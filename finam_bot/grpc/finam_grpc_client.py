@@ -2,6 +2,7 @@
 
 import grpc
 import asyncio
+from finam_bot.grpc.event_adapter import extract_price_from_event
 from finam_bot.grpc.candle_adapter import candle_close_price
 from typing import Optional
 
@@ -123,3 +124,16 @@ class FinamGrpcClient:
                 yield price
 
             await asyncio.sleep(delay)
+    async def stream_events(
+        self,
+        symbol: str,
+    ):
+        """
+        Realtime stream событий Финама (ticks).
+        """
+        request = self._build_events_request(symbol)
+
+        async for event in self.stub.GetEvents(request):
+            price = extract_price_from_event(event)
+            if price is not None:
+                yield price

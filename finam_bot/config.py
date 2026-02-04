@@ -211,3 +211,11 @@ def dump_config() -> None:
     print(f"EXCHANGE: {EXCHANGE}")
     print(f"DATABASE_URL: {DATABASE_URL}")
     print("========================")
+
+# Источник рыночных данных
+#MARKET_DATA_MODE = "events"  # "candles" | "events"
+MARKET_DATA_MODE = "candles"
+# Для candles
+CANDLES_TIMEFRAME = "M5"
+CANDLES_DELAY = 10
+
