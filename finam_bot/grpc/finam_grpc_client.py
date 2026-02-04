@@ -1,6 +1,8 @@
 # finam_bot/grpc/finam_grpc_client.py
 
 import grpc
+import asyncio
+from finam_bot.grpc.candle_adapter import candle_close_price
 from typing import Optional
 
 from finam_bot import config
@@ -99,3 +101,25 @@ class FinamGrpcClient:
         if self._channel:
             self._channel.close()
             print("🔌 Finam gRPC channel closed")
+    async def stream_candles(
+        self,
+        symbol: str,
+        timeframe: str = "M5",
+        delay: int = 10,
+    ):
+        """
+        Асинхронный генератор свечей (TEST-safe).
+        get_candles() синхронный → выносим в thread.
+        """
+        while True:
+            candles = await asyncio.to_thread(
+                self.get_candles,
+                symbol,
+                timeframe,
+            )
+
+            for candle in candles:
+                price = candle_close_price(candle)
+                yield price
+
+            await asyncio.sleep(delay)
