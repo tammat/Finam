@@ -30,6 +30,13 @@ load_dotenv(ENV_PATH)
 # === MODE ===
 READ_ONLY = True   # ⬅️ ВАЖНО
 
+
+
+# === Trading config ===
+
+START_EQUITY = float(
+    os.getenv("START_EQUITY", 100_000)
+)
 # ---------------------------------------------------------------------
 # GLOBAL MODES
 # ---------------------------------------------------------------------
