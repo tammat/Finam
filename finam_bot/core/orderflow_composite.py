@@ -1,41 +1,38 @@
-# finam_bot/core/orderflow_composite.py
+from __future__ import annotations
 
-from typing import Optional
+from dataclasses import dataclass
+from typing import Optional, List
+
 from finam_bot.core.orderflow_signal import OrderFlowSignal, AbsorptionSignal
 
 
+@dataclass
 class CompositeOrderFlowSignal:
-    def __init__(
-        self,
-        side: str,
-        confidence: float,
-        reasons: list[str],
-    ):
-        self.side = side
-        self.confidence = confidence
-        self.reasons = reasons
+    side: str                 # "BUY" | "SELL"
+    confidence: float         # 0.0 .. 1.0
+    reasons: List[str]
 
 
 def build_composite_signal(
     imbalance: Optional[OrderFlowSignal],
     absorption: Optional[AbsorptionSignal],
 ) -> Optional[CompositeOrderFlowSignal]:
-
-    # 1️⃣ нет imbalance → нет сигнала
+    # 1) нет imbalance -> нет сигнала
     if imbalance is None:
         return None
 
-    # 2️⃣ absorption ПРОТИВ → блок
-    if absorption is not None and absorption.side != imbalance.side:
-        return None
+    # 2) absorption против направления -> блок
+    if absorption is not None and absorption.side is not None:
+        if absorption.side != imbalance.side:
+            return None
 
-    confidence = imbalance.strength
     reasons = [imbalance.reason]
+    confidence = float(imbalance.strength)
 
-    # 3️⃣ absorption усиливает
-    if absorption is not None:
-        confidence = 1.0
+    # 3) absorption усиливает ТОЛЬКО если side совпадает (не None)
+    if absorption is not None and absorption.side == imbalance.side:
         reasons.append("absorption")
+        confidence = 1.0
 
     confidence = min(confidence, 1.0)
 
