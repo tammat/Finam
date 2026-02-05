@@ -1,4 +1,5 @@
 from finam_bot.core.orderflow_signal import AbsorptionSignal
+from finam_bot.core.market_snapshot import MarketSnapshot
 
 
 class OrderFlowAbsorptionDetector:
@@ -32,8 +33,37 @@ class OrderFlowAbsorptionDetector:
 
         # ✅ ВАЖНО: правильный конструктор
         return AbsorptionSignal(
-            side="BUY",                 # или SELL — см. ниже
-            imbalance=0.0,              # absorption = нет направленного перекоса
+            side=None,          # 🔥 КЛЮЧЕВО
             strength=total_volume,
+            imbalance=0.0,
             reason="absorption",
+        )
+
+
+    def analyze_snapshot(self, snapshot: MarketSnapshot):
+        """
+        Absorption + определение стороны по агрессору (bid/ask).
+        """
+        base = self.analyze(prices=snapshot.prices, volumes=snapshot.volumes)
+        if base is None:
+            return None
+
+        bid = snapshot.bid_volume or 0.0
+        ask = snapshot.ask_volume or 0.0
+        total = bid + ask
+
+        side = None
+        if total > 0:
+            ratio = bid / total
+            if ratio >= 0.6:
+                side = "BUY"
+            elif ratio <= 0.4:
+                side = "SELL"
+
+        # ВАЖНО: не мутируем base (на случай frozen dataclass)
+        return AbsorptionSignal(
+            side=side,
+            strength=base.strength,
+            imbalance=getattr(base, "imbalance", 0.0),
+            reason=base.reason,
         )

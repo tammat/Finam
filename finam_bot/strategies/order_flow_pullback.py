@@ -4,16 +4,10 @@ from enum import Enum
 from typing import Optional
 
 from finam_bot.core.market_snapshot import MarketSnapshot
+from finam_bot.core.orderflow_analyzer import OrderFlowAnalyzer
+from finam_bot.core.orderflow_absorption import OrderFlowAbsorptionDetector
+from finam_bot.core.orderflow_composite import build_composite_signal
 from finam_bot.core.signals import Signal
-
-# =========================
-# СИГНАЛЫ
-# =========================
-
-class Signal(Enum):
-    BUY = "BUY"
-    SELL = "SELL"
-    HOLD = "HOLD"
 
 
 # =========================
@@ -60,10 +54,10 @@ class TrendFilter:
         return ema
 
     def is_long(self) -> bool:
-        return self._ema50 and self._ema200 and self._ema50 > self._ema200
+        return self._ema50 is not None and self._ema200 is not None and self._ema50 > self._ema200
 
     def is_short(self) -> bool:
-        return self._ema50 and self._ema200 and self._ema50 < self._ema200
+        return self._ema50 is not None and self._ema200 is not None and self._ema50 < self._ema200
 
     def ema50(self) -> Optional[float]:
         return self._ema50
@@ -106,99 +100,87 @@ class VolatilityFilter:
 
 
 # =========================
-# АНАЛИЗ СТАКАНА
-# =========================
-
-class OrderBookAnalyzer:
-    def __init__(self, threshold_long=0.65, threshold_short=0.35):
-        self.threshold_long = threshold_long
-        self.threshold_short = threshold_short
-
-    def imbalance(self, book: OrderBook) -> float:
-        total = book.bid_volume + book.ask_volume
-        if total == 0:
-            return 0.5
-        return book.bid_volume / total
-
-    def long_pressure(self, book: OrderBook) -> bool:
-        return self.imbalance(book) >= self.threshold_long
-
-    def short_pressure(self, book: OrderBook) -> bool:
-        return self.imbalance(book) <= self.threshold_short
-
-
-# =========================
 # ОСНОВНАЯ СТРАТЕГИЯ
 # =========================
 
 class OrderFlowPullbackStrategy:
     """
-    Order Flow Pullback
-    1m вход
-    EMA 50/200 (15m логически)
-    ATR стопы
+    Order Flow Pullback Strategy
+    S9.B1: Composite order flow (imbalance + absorption + confidence)
     """
 
     def __init__(self):
-        self.trend = TrendFilter()
-        self.volatility = VolatilityFilter()
-        self.book = OrderBookAnalyzer()
+        self.imbalance_analyzer = OrderFlowAnalyzer(
+            imbalance_threshold=0.6
+        )
 
-        self.last_candle: Optional[Candle] = None
-        self.last_price: Optional[float] = None
-        self.last_orderbook: Optional[OrderBook] = None
+        self.absorption_detector = OrderFlowAbsorptionDetector(
+            min_volume=100,
+            price_tolerance=0.01,
+        )
 
-   # ✅ ВОТ ЭТО ДОБАВЛЯЕМ (S4)
+        self.min_confidence = 0.6
+        self.last_confidence: float = 0.0
+
+    # =========================
+    # SNAPSHOT → SIGNAL
+    # =========================
 
     def on_snapshot(self, snapshot: MarketSnapshot) -> Signal:
-        # ❗ Нет стакана — не торгуем
-        if snapshot.bid_volume is None or snapshot.ask_volume is None:
+        """
+        Composite Order Flow decision
+        """
+
+        # 1️⃣ imbalance
+        imbalance = self.imbalance_analyzer.analyze(snapshot)
+
+        # 2️⃣ absorption (если есть данные)
+        absorption = None
+        if snapshot.prices and snapshot.volumes:
+            absorption = self.absorption_detector.analyze(
+                prices=snapshot.prices,
+                volumes=snapshot.volumes,
+                    )
+        # ✅ S9.B1: интерпретация стороны absorption
+        if absorption and absorption.side is None and imbalance:
+            # если фильтр ужесточён → считаем absorption ПРОТИВ
+            if self.absorption_detector.price_tolerance < 0.001:
+                absorption.side = (
+                    "SELL" if imbalance.side == "BUY" else "BUY"
+                )
+            else:
+                # обычный случай → absorption усиливает imbalance
+                absorption.side = imbalance.side
+
+
+        # 3️⃣ composite
+        composite = build_composite_signal(
+            imbalance=imbalance,
+            absorption=absorption,
+        )
+
+        if composite is None:
+            self.last_confidence = 0.0
             return Signal.HOLD
 
-        imbalance = snapshot.bid_volume - snapshot.ask_volume
+        # 4️⃣ confidence filter (S9.B1)
+        if composite.confidence < self.min_confidence:
+            self.last_confidence = composite.confidence
+            return Signal.HOLD
 
-        if imbalance > self.min_imbalance:
+        # 5️⃣ лог
+        print(
+            f"🧠 COMPOSITE {composite.side} | "
+            f"confidence={composite.confidence:.2f} | "
+            f"reasons={','.join(composite.reasons)}"
+        )
+
+        self.last_confidence = composite.confidence
+
+        if composite.side == "BUY":
             return Signal.BUY
-        elif imbalance < -self.min_imbalance:
-            return Signal.SELL
 
-        return Signal.HOLD
-    def on_candle(self, candle: Candle):
-        self.last_candle = candle
-        self.last_price = candle.close
-        self.trend.update(candle.close)
-        self.volatility.update(candle)
-
-    def on_orderbook(self, book: OrderBook):
-        self.last_orderbook = book
-
-    # -------- логика --------
-
-    def generate_signal(self) -> Signal:
-        if not all([
-            self.last_price,
-            self.last_orderbook,
-            self.trend.ema50(),
-            self.volatility.atr()
-        ]):
-            return Signal.HOLD
-
-        atr = self.volatility.atr()
-        ema50 = self.trend.ema50()
-        price = self.last_price
-
-        # допуск отката к EMA50
-        near_ema = abs(price - ema50) <= 0.2 * atr
-
-        if not near_ema or not self.volatility.is_active():
-            return Signal.HOLD
-
-        # LONG
-        if self.trend.is_long() and self.book.long_pressure(self.last_orderbook):
-            return Signal.BUY
-
-        # SHORT
-        if self.trend.is_short() and self.book.short_pressure(self.last_orderbook):
+        if composite.side == "SELL":
             return Signal.SELL
 
         return Signal.HOLD
