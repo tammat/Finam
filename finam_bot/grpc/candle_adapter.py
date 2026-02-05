@@ -1,14 +1,29 @@
 # finam_bot/grpc/candle_adapter.py
 
-def decimal_to_float(decimal) -> float:
-    """
-    Finam Decimal(num, scale) -> float
-    """
-    return decimal.num / (10 ** decimal.scale)
+from dataclasses import dataclass
+from typing import Optional
 
 
-def candle_close_price(candle) -> float:
+@dataclass
+class Candle:
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: Optional[float] = None
+    timestamp: Optional[int] = None
+
+
+def candle_from_proto(proto) -> Candle:
     """
-    Из gRPC candle берём цену закрытия
+    Adapter: Finam gRPC Candle → internal Candle
     """
-    return decimal_to_float(candle.close)
+
+    return Candle(
+        open=proto.open,
+        high=proto.high,
+        low=proto.low,
+        close=proto.close,
+        volume=getattr(proto, "volume", None),
+        timestamp=getattr(proto, "timestamp", None),
+    )

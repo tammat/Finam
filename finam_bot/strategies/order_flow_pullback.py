@@ -3,6 +3,8 @@ from collections import deque
 from enum import Enum
 from typing import Optional
 
+from finam_bot.core.market_snapshot import MarketSnapshot
+from finam_bot.core.signals import Signal
 
 # =========================
 # СИГНАЛЫ
@@ -146,8 +148,21 @@ class OrderFlowPullbackStrategy:
         self.last_price: Optional[float] = None
         self.last_orderbook: Optional[OrderBook] = None
 
-    # -------- обновления --------
+   # ✅ ВОТ ЭТО ДОБАВЛЯЕМ (S4)
 
+    def on_snapshot(self, snapshot: MarketSnapshot) -> Signal:
+        # ❗ Нет стакана — не торгуем
+        if snapshot.bid_volume is None or snapshot.ask_volume is None:
+            return Signal.HOLD
+
+        imbalance = snapshot.bid_volume - snapshot.ask_volume
+
+        if imbalance > self.min_imbalance:
+            return Signal.BUY
+        elif imbalance < -self.min_imbalance:
+            return Signal.SELL
+
+        return Signal.HOLD
     def on_candle(self, candle: Candle):
         self.last_candle = candle
         self.last_price = candle.close

@@ -27,6 +27,8 @@ ENV_PATH = BASE_DIR / ".env"
 
 load_dotenv(ENV_PATH)
 
+# === MODE ===
+READ_ONLY = True   # ⬅️ ВАЖНО
 
 # ---------------------------------------------------------------------
 # GLOBAL MODES
@@ -218,4 +220,17 @@ MARKET_DATA_MODE = "candles"
 # Для candles
 CANDLES_TIMEFRAME = "M5"
 CANDLES_DELAY = 10
+# === ATR CONFIG ===
+
+ATR_MODE = "BOTH"        # CLASSIC | EMA | BOTH
+ATR_PERIOD = 14
+ATR_EMA_PERIOD = 7       # быстрый ATR для 1m
+
+SYMBOL = "NGG6"
+
+ATR_MODE = "BOTH"
+ATR_PERIOD = 14
+ATR_EMA_PERIOD = 7
+
+
 

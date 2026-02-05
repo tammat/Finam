@@ -1,5 +1,3 @@
-# finam_bot/core/position.py
-
 from dataclasses import dataclass
 from typing import Optional
 
@@ -7,20 +5,45 @@ from typing import Optional
 @dataclass
 class Position:
     symbol: str
-    side: str          # LONG / SHORT
-    qty: int
+    side: str          # "LONG" | "SHORT"
+    qty: float
     entry_price: float
+    stop_loss: float
+    take_profit: float
+
     exit_price: Optional[float] = None
+    exit_reason: Optional[str] = None  # "STOP" | "TAKE"
 
-    def close(self, price: float) -> float:
+    def is_long(self) -> bool:
+        return self.side == "LONG"
+
+    def check_exit(self, price: float) -> Optional[str]:
+        """
+        Возвращает:
+        - "STOP"
+        - "TAKE"
+        - None
+        """
+        if self.is_long():
+            if price <= self.stop_loss:
+                return "STOP"
+            if price >= self.take_profit:
+                return "TAKE"
+        else:  # SHORT
+            if price >= self.stop_loss:
+                return "STOP"
+            if price <= self.take_profit:
+                return "TAKE"
+
+        return None
+
+    def close(self, price: float, reason: Optional[str] = None) -> float:
         self.exit_price = price
-        return self.pnl()
+        self.exit_reason = reason
 
-    def pnl(self) -> float:
-        if self.exit_price is None:
-            return 0.0
-
-        if self.side == "LONG":
-            return (self.exit_price - self.entry_price) * self.qty
+        if self.is_long():
+            pnl = (price - self.entry_price) * self.qty
         else:
-            return (self.entry_price - self.exit_price) * self.qty
+            pnl = (self.entry_price - price) * self.qty
+
+        return pnl

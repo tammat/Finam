@@ -2,50 +2,26 @@
 
 import asyncio
 
-from finam_bot import config
-from finam_bot.telegram.controller import TelegramController
 from finam_bot.grpc.finam_grpc_client import FinamGrpcClient
+from finam_bot.core.trade_engine import TradeEngine
+from finam_bot.core.market_snapshot import MarketSnapshot
+
+SYMBOL = "NGG6"
 
 
 async def main():
-    # --- Telegram ---
-    controller = TelegramController()
-    await controller.run()
+    print("🟢 START S5.A — REAL DATA / READ-ONLY")
 
-    # --- Finam gRPC ---
     grpc = FinamGrpcClient()
+    engine = TradeEngine(symbol=SYMBOL)
 
-    try:
-        # ====== SWITCH MARKET DATA SOURCE ======
-        if config.MARKET_DATA_MODE == "events":
-            print("📡 MARKET DATA MODE: REALTIME EVENTS (C+)")
+    async for price in grpc.stream_candles(symbol=SYMBOL, timeframe="1m"):
+        snapshot = MarketSnapshot(
+            symbol=SYMBOL,
+            price=price,
+        )
 
-            async for price in grpc.stream_events(symbol="GAZP"):
-                await controller.on_price(price)
-
-        else:
-            print("🕯 MARKET DATA MODE: CANDLES (C)")
-
-            async for price in grpc.stream_candles(
-                symbol="GAZP",
-                timeframe=config.CANDLES_TIMEFRAME,
-                delay=config.CANDLES_DELAY,
-            ):
-                await controller.on_price(price)
-
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        print("⛔ Остановка бота")
-
-    finally:
-        if controller.app:
-            try:
-                await controller.app.updater.stop()
-            except Exception:
-                pass
-
-            await controller.app.stop()
-            await controller.app.shutdown()
-            print("🧹 Telegram бот корректно остановлен")
+        engine.on_market_data(snapshot)
 
 
 if __name__ == "__main__":

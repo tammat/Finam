@@ -1,139 +1,41 @@
 # finam_bot/grpc/finam_grpc_client.py
 
-import grpc
+# finam_bot/grpc/finam_grpc_client.py
+
 import asyncio
-from finam_bot.grpc.event_adapter import extract_price_from_event
-from finam_bot.grpc.candle_adapter import candle_close_price
-from typing import Optional
+from typing import AsyncIterator, List
 
-from finam_bot import config
-
-# gRPC stubs
-from finam_bot.grpc.generated.proto.tradeapi.v1 import (
-    candles_pb2,
-    candles_pb2_grpc,
-    common_pb2,
-)
+print("🧪 Finam gRPC client initialized in TEST mode")
 
 
 class FinamGrpcClient:
     """
-    gRPC client for Finam Trade API.
-    All gRPC logic is isolated here.
+    READ-ONLY gRPC client.
+    Пока работаем ТОЛЬКО в тестовом режиме.
     """
 
-    def __init__(self) -> None:
-        self._channel: Optional[grpc.Channel] = None
-        self._candles_stub: Optional[candles_pb2_grpc.CandlesServiceStub] = None
+    def __init__(self):
+        self.test_mode = True
 
-        if config.MODE.value == "REAL":
-            self._connect()
-        else:
-            # TEST mode — no real connections
-            print("🧪 Finam gRPC client initialized in TEST mode")
-
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
-
-    def _connect(self) -> None:
-        if not config.FINAM_API_KEY:
-            raise RuntimeError("FINAM_API_KEY не задан")
-
-        # gRPC endpoint Финама (пример, можно вынести в config)
-        target = "trade-api.finam.ru:443"
-
-        credentials = grpc.ssl_channel_credentials()
-
-        self._channel = grpc.secure_channel(
-            target,
-            credentials,
-        )
-
-        self._candles_stub = candles_pb2_grpc.CandlesServiceStub(self._channel)
-
-        print("✅ Finam gRPC channel connected")
-
-    def _metadata(self):
-        return (
-            ("authorization", f"Bearer {config.FINAM_API_KEY}"),
-        )
-
-    # ------------------------------------------------------------------
-    # Market Data
-    # ------------------------------------------------------------------
-
-    def get_candles(
-        self,
-        symbol: str,
-        timeframe: str,
-        limit: int = 100,
-    ):
+    async def get_candles(self, symbol: str, timeframe: str = "1m") -> List[float]:
         """
-        Получение свечей.
-        В TEST режиме возвращает пустой список.
+        TEST candles — возвращаем фейковые цены
         """
+        print(f"🧪 TEST get_candles({symbol}, {timeframe})")
+        return [
+            100.0,
+            100.2,
+            100.1,
+            100.4,
+            100.3,
+        ]
 
-        if config.MODE.value != "REAL":
-            print(f"🧪 TEST get_candles({symbol}, {timeframe})")
-            return []
-
-        if not self._candles_stub:
-            raise RuntimeError("CandlesServiceStub не инициализирован")
-
-        request = candles_pb2.GetCandlesRequest(
-            security_code=symbol,
-            timeframe=timeframe,
-            count=limit,
-        )
-
-        response = self._candles_stub.GetCandles(
-            request,
-            metadata=self._metadata(),
-        )
-
-        return response.candles
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-
-    def close(self) -> None:
-        if self._channel:
-            self._channel.close()
-            print("🔌 Finam gRPC channel closed")
-    async def stream_candles(
-        self,
-        symbol: str,
-        timeframe: str = "M5",
-        delay: int = 10,
-    ):
+    async def stream_candles(self, symbol: str, timeframe: str = "1m") -> AsyncIterator[float]:
         """
-        Асинхронный генератор свечей (TEST-safe).
-        get_candles() синхронный → выносим в thread.
+        Асинхронный стрим цен (TEST)
         """
         while True:
-            candles = await asyncio.to_thread(
-                self.get_candles,
-                symbol,
-                timeframe,
-            )
-
-            for candle in candles:
-                price = candle_close_price(candle)
+            candles = await self.get_candles(symbol, timeframe)
+            for price in candles:
                 yield price
-
-            await asyncio.sleep(delay)
-    async def stream_events(
-        self,
-        symbol: str,
-    ):
-        """
-        Realtime stream событий Финама (ticks).
-        """
-        request = self._build_events_request(symbol)
-
-        async for event in self.stub.GetEvents(request):
-            price = extract_price_from_event(event)
-            if price is not None:
-                yield price
+            await asyncio.sleep(1)

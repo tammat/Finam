@@ -8,6 +8,7 @@ from finam_bot.core.market_snapshot import MarketSnapshot
 from finam_bot.core.risk_manager import RiskManager
 from finam_bot.strategies.order_flow_pullback import OrderFlowPullbackStrategy
 from finam_bot.core.equity_tracker import EquityTracker
+
 print("🔥 LOADED trade_engine.py FROM:", __file__)
 
 class TradeEngine:
@@ -68,8 +69,9 @@ class TradeEngine:
                 )
 
                 # 🔽 статистика
-                self.stats.on_trade(pnl)
-
+                self.stats.on_trade_exit(
+                    pnl=pnl,
+                    equity=self.equity.equity                )
                 # 🔽 логер
                 self.logger.log(
                     symbol=self.symbol,
@@ -85,7 +87,7 @@ class TradeEngine:
                     pnl=pnl,
                     reason=exit_reason,
                 )
-
+                self.stats = TradeStats()
                 print(f"🔁 EXIT {exit_reason} PnL={pnl:.2f}")
 
                 self.position = None
@@ -144,8 +146,12 @@ class TradeEngine:
     def status(self):
         return {
             "symbol": self.symbol,
-            "position": self.position,
+            "equity": self.equity.current,
             "total_pnl": self.total_pnl,
-            "equity": self.equity.last(),
-            "trades": len(self.equity.curve),
+            "trades": self.stats.trades,
+            "wins": self.stats.wins,
+            "losses": self.stats.losses,
+            "winrate": round(self.stats.winrate, 2),
+            "expectancy": round(self.stats.expectancy, 2),
+            "max_drawdown": round(self.stats.max_drawdown, 2),
         }
