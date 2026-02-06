@@ -56,6 +56,7 @@ class BacktestEngine:
         fill_policy: FillPolicy = "worst",
     ):
         self.symbol = symbol
+        self.equity_curve: list[float] = []
         self.strategy = strategy
         self.risk = risk or RiskManager(equity=start_equity)
         self.atr = ATRCalc(period=atr_period)
@@ -202,6 +203,7 @@ class BacktestEngine:
         atr_floor: минимальный ATR, чтобы не улетал размер позиции на первых барах.
         """
         candles = list(candles)
+        self.equity_curve = [self.broker.equity]
         for i, c in enumerate(candles):
             # 1) исполняем отложенный вход по OPEN текущего бара
             if self._pending is not None and self.broker.position is None:
@@ -290,12 +292,18 @@ class BacktestEngine:
                             stop_loss=float(trade.stop_loss),
                             take_profit=float(trade.take_profit),
                         )
+                
+            self.equity_curve.append(self.broker.equity)
 
         # EOD close
         if self.broker.position is not None and candles:
             self.broker.close_position(price=candles[-1].close, ts=candles[-1].ts, reason="EOD")
 
+        # equity curve: always include final equity
+        self.equity_curve.append(self.broker.equity)
+
         return self.broker
+
     def _normalize_signal(self, sig):
         # уже enum
         if isinstance(sig, Signal):
