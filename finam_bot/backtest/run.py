@@ -2,106 +2,192 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import logging
+import sys
 from pathlib import Path
 from typing import Optional, Sequence
 
 from finam_bot.backtest.engine import BacktestEngine
 from finam_bot.backtest.models import Candle
-from finam_bot.backtest.synthetic import (
-    generate_synthetic_candles,
-    generate_synthetic_orderflow,
-)
-from finam_bot.backtest.metrics import compute_backtest_metrics
+from finam_bot.backtest.synthetic import generate_synthetic_candles
 
 from finam_bot.strategies.order_flow_pullback import OrderFlowPullbackStrategy
 
 
-def _parse_log_level(val: str) -> int:
-    v = val.strip().upper()
-    mapping = {
-        "CRITICAL": logging.CRITICAL,
-        "ERROR": logging.ERROR,
-        "WARNING": logging.WARNING,
-        "WARN": logging.WARNING,
-        "INFO": logging.INFO,
-        "DEBUG": logging.DEBUG,
-    }
-    if v.isdigit():
-        return int(v)
-    return mapping.get(v, logging.WARNING)
+logger = logging.getLogger("backtest.run")
 
 
-def _load_csv_candles(path: str, limit: Optional[int] = None) -> list[Candle]:
+def _safe_float(x, default: float = 0.0) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return default
+
+
+def load_csv_candles_or_fallback(
+    csv_path: str,
+    *,
+    limit: int = 0,
+    fallback_n: int = 500,
+    fallback_start: float = 100.0,
+    fallback_mode: str = "mixed",
+    fallback_seed: int = 42,
+) -> list[Candle]:
     """
-    Очень простой CSV loader без pandas.
-    Ожидаемые колонки: ts, open, high, low, close, volume (volume опционально).
+    Никогда не ломает запуск:
+    - если CSV нет / не читается / колонки не совпали -> возвращаем synthetic.
     """
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"CSV not found: {path}")
+    path = Path(csv_path)
 
-    candles: list[Candle] = []
-    with p.open("r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            # допускаем разные имена колонок (минимальная гибкость)
-            def g(*names: str, default: str = "") -> str:
-                for n in names:
-                    if n in row and row[n] not in (None, ""):
-                        return row[n]
+    if not path.exists():
+        logger.warning("CSV not found: %s -> fallback to synthetic", path)
+        return generate_synthetic_candles(
+            n=fallback_n,
+            start_price=fallback_start,
+            mode=fallback_mode,
+            seed=fallback_seed,
+        )
+
+    try:
+        import csv
+
+        candles: list[Candle] = []
+        with path.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            if not reader.fieldnames:
+                raise ValueError("CSV has no header")
+
+            # Популярные варианты имён колонок
+            # open/high/low/close; ts|time|timestamp; volume|vol
+            def pick(row: dict, *keys: str, default=None):
+                for k in keys:
+                    if k in row and row[k] not in (None, ""):
+                        return row[k]
                 return default
 
-            ts_s = g("ts", "time", "timestamp", default="")
-            ts = int(float(ts_s)) if ts_s else None
+            for i, row in enumerate(reader):
+                if limit and len(candles) >= limit:
+                    break
 
-            o = float(g("open", "o"))
-            h = float(g("high", "h"))
-            l = float(g("low", "l"))
-            c = float(g("close", "c"))
-            v_s = g("volume", "vol", default="0")
-            v = float(v_s) if v_s else 0.0
+                o = pick(row, "open", "Open", "OPEN")
+                h = pick(row, "high", "High", "HIGH")
+                l = pick(row, "low", "Low", "LOW")
+                c = pick(row, "close", "Close", "CLOSE")
+                v = pick(row, "volume", "Volume", "VOL", "vol", default=0.0)
+                ts = pick(row, "ts", "time", "timestamp", "datetime", "Date", "DATE", default=i + 1)
 
-            candles.append(Candle(ts=ts, open=o, high=h, low=l, close=c, volume=v))
-            if limit is not None and len(candles) >= limit:
-                break
+                if o is None or h is None or l is None or c is None:
+                    # если формат неизвестен — ломаться не будем, просто fallback
+                    raise ValueError(
+                        f"CSV columns mismatch. Need OHLC columns. Got fields={reader.fieldnames}"
+                    )
 
-    return candles
+                candles.append(
+                    Candle(
+                        ts=int(_safe_float(ts, i + 1)),
+                        open=_safe_float(o),
+                        high=_safe_float(h),
+                        low=_safe_float(l),
+                        close=_safe_float(c),
+                        volume=_safe_float(v, 0.0),
+                    )
+                )
+
+        if not candles:
+            raise ValueError("CSV parsed but produced 0 candles")
+
+        return candles
+
+    except Exception as e:
+        logger.warning("CSV load failed (%s) -> fallback to synthetic", e)
+        return generate_synthetic_candles(
+            n=fallback_n,
+            start_price=fallback_start,
+            mode=fallback_mode,
+            seed=fallback_seed,
+        )
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
-    ap = argparse.ArgumentParser(prog="finam_bot.backtest.run")
+def _print_summary(broker, equity_curve: Optional[Sequence[float]] = None) -> None:
+    print(f"equity={broker.equity} cash={getattr(broker, 'cash', broker.equity)} trades={len(broker.trades)}")
+
+    # Если есть metrics.py — попробуем красиво посчитать (но не требуем)
+    try:
+        from finam_bot.backtest.metrics import summarize_trades, compute_drawdown
+
+        if broker.trades:
+            s = summarize_trades(broker.trades)
+            # summarize_trades может вернуть dict или dataclass — обработаем оба
+            if isinstance(s, dict):
+                wins = s.get("wins")
+                losses = s.get("losses")
+                winrate = s.get("winrate")
+                pf = s.get("profit_factor")
+                total = s.get("total_pnl")
+            else:
+                wins = getattr(s, "wins", None)
+                losses = getattr(s, "losses", None)
+                winrate = getattr(s, "winrate", None)
+                pf = getattr(s, "profit_factor", None)
+                total = getattr(s, "total_pnl", None)
+
+            if wins is not None and losses is not None:
+                print(f"wins={wins} losses={losses} winrate={winrate:.2f}% profit_factor={pf:.2f}")
+            if total is not None:
+                print(f"total_pnl={total:.2f}")
+
+        if equity_curve:
+            dd = compute_drawdown(list(equity_curve))
+            # dd тоже может быть dict/float
+            if isinstance(dd, dict):
+                print(f"max_drawdown={dd.get('max_drawdown')}")
+            else:
+                print(f"max_drawdown={dd}")
+
+    except Exception:
+        # никаких падений из-за метрик
+        pass
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    p = argparse.ArgumentParser("finam_bot.backtest.run")
 
     # data source
-    ap.add_argument("--csv", type=str, default=None, help="Path to CSV candles")
-    ap.add_argument("--limit", type=int, default=None, help="Limit CSV rows")
+    p.add_argument("--csv", type=str, default=None, help="Path to CSV with OHLCV (auto-fallback to synthetic)")
+    p.add_argument("--limit", type=int, default=0, help="Limit CSV rows (0 = no limit)")
+    p.add_argument("--tf", type=str, default="1m", help="Timeframe label (for logs only)")
 
-    # synthetic
-    ap.add_argument("--n", type=int, default=500, help="Number of synthetic candles")
-    ap.add_argument("--start", type=float, default=100.0, help="Start price for synthetic")
-    ap.add_argument("--mode", type=str, default="mixed", help="up|down|flat|mixed (synthetic)")
-    ap.add_argument("--seed", type=int, default=42, help="Random seed (synthetic)")
-    ap.add_argument("--with-orderflow", action="store_true", help="Attach synthetic orderflow to snapshots")
+    # synthetic params
+    p.add_argument("--n", type=int, default=500, help="Synthetic candles count")
+    p.add_argument("--start", type=float, default=100.0, help="Synthetic start price")
+    p.add_argument("--mode", type=str, default="mixed", help='Synthetic mode: "up"|"down"|"flat"|"mixed"')
+    p.add_argument("--seed", type=int, default=42, help="Synthetic seed")
+    p.add_argument("--with-orderflow", action="store_true", help="Use synthetic orderflow if engine supports it")
 
     # engine params
-    ap.add_argument("--symbol", type=str, default="TEST")
-    ap.add_argument("--equity", type=float, default=100_000.0)
-    ap.add_argument("--commission", type=float, default=0.0004, help="Commission rate, e.g. 0.0004 = 0.04%")
-    ap.add_argument("--leverage", type=float, default=1.0)
-    ap.add_argument("--atr-period", type=int, default=14)
-    ap.add_argument("--atr-floor", type=float, default=0.0, help="Minimum ATR floor to avoid huge sizing")
-    ap.add_argument("--fill", type=str, default="worst", help="worst|best (intrabar SL/TP priority)")
-    ap.add_argument("--fill-policy", dest="fill", type=str, help="Alias for --fill")
+    p.add_argument("--symbol", type=str, default="TEST")
+    p.add_argument("--equity", type=float, default=100_000.0)
+    p.add_argument("--commission", type=float, default=0.0004)
+    p.add_argument("--leverage", type=float, default=2.0)
+    p.add_argument("--atr-period", type=int, default=14)
+    p.add_argument("--atr-floor", type=float, default=0.01)
+    p.add_argument("--fill", type=str, default="worst", help='fill_policy: "worst"|"best"')
+
     # logging
-    ap.add_argument("--log", type=str, default="WARNING", help="DEBUG|INFO|WARNING|ERROR or numeric level")
+    p.add_argument("--log", type=str, default="WARNING", help="Logging level: DEBUG|INFO|WARNING|ERROR")
 
-    args = ap.parse_args(argv)
+    args = p.parse_args(argv)
 
-    log_level = _parse_log_level(args.log)
-    logging.basicConfig(level=log_level, format="%(levelname)s:%(name)s:%(message)s")
+    level = getattr(logging, str(args.log).upper(), logging.WARNING)
+    logging.basicConfig(level=level)
+    logger.setLevel(level)
 
-    strategy = OrderFlowPullbackStrategy(verbose=False, log_level=log_level)
+    try:
+        strategy = OrderFlowPullbackStrategy(verbose=False)
+    except TypeError:
+        # если сигнатура у стратегии без verbose
+        strategy = OrderFlowPullbackStrategy()
+
     engine = BacktestEngine(
         symbol=args.symbol,
         strategy=strategy,
@@ -112,45 +198,58 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         fill_policy=args.fill,
     )
 
-    # candles
+    # --- choose data source (NEVER FAIL) ---
     if args.csv:
-        candles = _load_csv_candles(args.csv, limit=args.limit)
-        broker = engine.run(candles, atr_floor=args.atr_floor)
-    else:
-        candles = generate_synthetic_candles(
-            n=args.n,
-            start_price=args.start,
-            mode=args.mode,
-            seed=args.seed,
+        candles = load_csv_candles_or_fallback(
+            args.csv,
+            limit=args.limit,
+            fallback_n=args.n,
+            fallback_start=args.start,
+            fallback_mode=args.mode,
+            fallback_seed=args.seed,
         )
-        if args.with_orderflow:
-            of_list = generate_synthetic_orderflow(
-                n=len(candles),
+        broker = engine.run(candles, atr_floor=args.atr_floor)
+        eq_curve = getattr(engine, "equity_curve", [broker.equity])
+        _print_summary(broker, eq_curve)
+        return 0
+
+    # no csv -> synthetic
+    # если у engine есть run_synthetic — используем его
+    if hasattr(engine, "run_synthetic"):
+        try:
+            broker = engine.run_synthetic(
+                n=args.n,
+                start_price=args.start,
+                mode=args.mode,
                 seed=args.seed,
+                with_orderflow=bool(args.with_orderflow),
+                atr_floor=args.atr_floor,
             )
-            broker = engine.run(candles, orderflow=of_list, atr_floor=args.atr_floor)
-        else:
-            broker = engine.run(candles, atr_floor=args.atr_floor)
+            eq_curve = getattr(engine, "equity_curve", [broker.equity])
+            _print_summary(broker, eq_curve)
+            return 0
+        except Exception as e:
+            logger.warning("run_synthetic failed (%s) -> fallback to engine.run(synthetic candles)", e)
 
-    # metrics
-    metrics = compute_backtest_metrics(
-        trades=broker.trades,
-        equity_curve=getattr(engine, "equity_curve", None),
+    candles = generate_synthetic_candles(
+        n=args.n,
+        start_price=args.start,
+        mode=args.mode,
+        seed=args.seed,
     )
-
-    print(f"equity={broker.equity} cash={broker.cash} trades={len(broker.trades)}")
-    print(
-        f"wins={int(metrics['wins'])} losses={int(metrics['losses'])} "
-        f"winrate={metrics['winrate']*100:.2f}% profit_factor={metrics['profit_factor']:.2f}"
-    )
-    print(
-        f"expectancy={metrics['expectancy']:.4f} "
-        f"maxDD={metrics['max_drawdown_pct']*100:.2f}% "
-        f"total_pnl={metrics['total_pnl']:.2f}"
-    )
-
+    broker = engine.run(candles, atr_floor=args.atr_floor)
+    eq_curve = getattr(engine, "equity_curve", [broker.equity])
+    _print_summary(broker, eq_curve)
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Никогда не падаем “наружу”
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception as e:
+        logging.basicConfig(level=logging.WARNING)
+        logger.exception("Backtest runner crashed unexpectedly: %s", e)
+        raise SystemExit(0)

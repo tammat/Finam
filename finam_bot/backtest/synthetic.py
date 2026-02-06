@@ -18,39 +18,46 @@ class SyntheticOF:
 
 def generate_synthetic_orderflow(
     n: int,
-    *,
-    price_ref: float = 100.0,
     volume_base: float = 1000.0,
     volume_noise: float = 0.2,
     seed: Optional[int] = 42,
+    absorption_prob: float = 0.25,
 ) -> list[SyntheticOF]:
     """
-    Простой synthetic orderflow:
-    - bid/ask объёмы
-    - небольшой список "принтов" prices/volumes (для absorption detector)
+    Генерирует синтетические order-flow данные для каждой свечи.
 
-    Это НЕ реалистичная лента, но достаточно, чтобы стратегия могла
-    выдавать сигналы в synthetic backtest без CSV.
+    - bid_volume/ask_volume: создают imbalance (иногда сильный).
+    - prices/volumes: иногда создают 'absorption' (высокий объём при почти плоской цене).
     """
+    if n <= 0:
+        return []
+
     rng = random.Random(seed)
     out: list[SyntheticOF] = []
 
-    for _ in range(max(0, n)):
+    for _ in range(n):
         total = max(1.0, volume_base * (1.0 + rng.uniform(-volume_noise, volume_noise)))
 
-        r = rng.uniform(0.3, 0.7)
-        bid = total * r
+        r = rng.random()
+        if r < 0.35:
+            ratio = 0.75  # buy pressure
+        elif r < 0.70:
+            ratio = 0.25  # sell pressure
+        else:
+            ratio = 0.50  # neutral
+
+        bid = total * ratio
         ask = total - bid
 
-        k = rng.randint(3, 6)
-        prices = [price_ref + rng.uniform(-0.02, 0.02) for _ in range(k)]
-        vols_raw = [max(1.0, rng.random()) for _ in range(k)]
-        s = sum(vols_raw)
-        volumes = [total * (v / s) for v in vols_raw]
+        if rng.random() < absorption_prob:
+            base = 100.0
+            prices = [base, base + 0.01, base - 0.01, base]
+            volumes = [40.0, 40.0, 50.0]  # sum=130 >= 100
+        else:
+            prices = []
+            volumes = []
 
         out.append(SyntheticOF(bid_volume=bid, ask_volume=ask, prices=prices, volumes=volumes))
-
-        price_ref += rng.gauss(0.0, 0.05)
 
     return out
 
@@ -59,9 +66,9 @@ def generate_synthetic_candles(
     n: int,
     start_price: float = 100.0,
     mode: str = "mixed",          # "up" | "down" | "flat" | "mixed"
-    drift: float = 0.02,
-    volatility: float = 0.10,
-    wick: float = 0.15,
+    drift: float = 0.02,          # средний шаг цены (в пунктах) на бар
+    volatility: float = 0.10,     # шум (в пунктах) на бар
+    wick: float = 0.15,           # размер теней (в пунктах)
     start_ts: Optional[int] = 1,
     ts_step: int = 1,
     seed: Optional[int] = 42,
@@ -85,6 +92,7 @@ def generate_synthetic_candles(
             return -abs(drift)
         if mode == "flat":
             return 0.0
+        # mixed: 1/3 up, 1/3 flat, 1/3 down
         third = max(1, n // 3)
         if i < third:
             return abs(drift)
@@ -92,34 +100,26 @@ def generate_synthetic_candles(
             return 0.0
         return -abs(drift)
 
-    candles: List[Candle] = []
+    candles: list[Candle] = []
     ts = start_ts
 
     for i in range(n):
-        d = _drift_for_i(i)
-        shock = rng.gauss(0.0, volatility)
-
         o = price
-        c = price + d + shock
+        step = _drift_for_i(i) + rng.gauss(0.0, volatility)
+        c = max(0.01, o + step)
 
-        base_hi = max(o, c)
-        base_lo = min(o, c)
+        # тени
+        up_wick = abs(rng.gauss(0.0, wick))
+        dn_wick = abs(rng.gauss(0.0, wick))
 
-        hi = base_hi + abs(rng.gauss(0.0, wick))
-        lo = base_lo - abs(rng.gauss(0.0, wick))
+        h = max(o, c) + up_wick
+        l = min(o, c) - dn_wick
+        if l <= 0:
+            l = 0.01
 
-        vol = max(0.0, volume_base * (1.0 + rng.uniform(-volume_noise, volume_noise)))
+        vol = max(1.0, volume_base * (1.0 + rng.uniform(-volume_noise, volume_noise)))
 
-        candles.append(
-            Candle(
-                ts=ts,
-                open=float(o),
-                high=float(hi),
-                low=float(lo),
-                close=float(c),
-                volume=float(vol),
-            )
-        )
+        candles.append(Candle(ts=ts, open=o, high=h, low=l, close=c, volume=vol))
 
         price = c
         if ts is not None:
