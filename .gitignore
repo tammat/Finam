@@ -20,3 +20,5 @@ Thumbs.db
 .idea/
 trades.csv
 scripts/
+#data
+finam_bot/data/
