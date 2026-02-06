@@ -79,8 +79,9 @@ class BrokerSim:
         if self.cash < margin:
             raise RuntimeError(f"Not enough cash for margin: need={margin:.2f} have={self.cash:.2f}")
 
-        fee = self.commission.calc(price * qty)
-        self._apply_fee(fee)
+        # комиссия на вход
+        fee_entry = self.commission.calc(price * qty)
+        self._apply_fee(fee_entry)
 
         self.used_margin = margin
         self.position = Position(
@@ -93,6 +94,9 @@ class BrokerSim:
             entry_ts=ts,
         )
 
+        # сохраняем fee_entry на позиции (даже если поля нет в dataclass)
+        setattr(self.position, "entry_fee", float(fee_entry))
+
     def close_position(
         self,
         price: float,
@@ -103,13 +107,22 @@ class BrokerSim:
             raise RuntimeError("No open position")
 
         pos = self.position
-        notional_exit = price * pos.qty
-        fee = self.commission.calc(notional_exit)
-        self._apply_fee(fee)
 
+        # комиссия на выход
+        fee_exit = self.commission.calc(price * pos.qty)
+        self._apply_fee(fee_exit)
+
+        # PnL
         pnl = pos.unrealized_pnl(price)
         self.cash += pnl
         self.equity += pnl
+
+        # освободили маржу/позицию
+        self.used_margin = 0.0
+        self.position = None
+
+        fee_entry = float(getattr(pos, "entry_fee", 0.0))
+        total_fees = fee_entry + float(fee_exit)
 
         trade = Trade(
             symbol=pos.symbol,
@@ -119,14 +132,10 @@ class BrokerSim:
             exit_price=price,
             entry_ts=pos.entry_ts,
             exit_ts=ts,
-            pnl=pnl,
-            fees=fee,  # сюда кладем только fee выхода; входную уже списали (ниже добавим в engine)
+            pnl=float(pnl),
+            fees=float(total_fees),
             reason=reason,
         )
-
-        # освободили маржу
-        self.used_margin = 0.0
-        self.position = None
 
         self.trades.append(trade)
         return trade

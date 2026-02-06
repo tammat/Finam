@@ -140,10 +140,15 @@ class BacktestEngine:
         if "atr" in params:
             kwargs["atr"] = atr
 
+        # ✅ p.3: учитываем текущую equity (динамический размер позиции)
+        # - если risk.calculate(...) принимает equity -> даём broker.equity
+        # - если принимает capital -> тоже даём broker.equity (совместимость)
+        eq = float(getattr(self.broker, "equity", getattr(self.broker, "cash", 0.0)))
+
         if "equity" in params:
-            kwargs["equity"] = float(getattr(self.broker, "equity", self.broker.cash))
-        if "capital" in params:
-            kwargs["capital"] = float(getattr(self.broker, "equity", self.broker.cash))
+            kwargs["equity"] = eq
+        elif "capital" in params:
+            kwargs["capital"] = eq
 
         try:
             return fn(**kwargs)

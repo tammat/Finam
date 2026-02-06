@@ -40,7 +40,7 @@ class Position:
     stop_loss: float
     take_profit: float
     entry_ts: Optional[int] = None
-
+    entry_fee: float = 0.0
     def is_long(self) -> bool:
         return self.side == "LONG"
 

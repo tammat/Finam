@@ -62,16 +62,26 @@ def load_csv_candles(path: str, limit: int = 0) -> List[Candle]:
 
 
 def load_candles_auto(args) -> Tuple[str, List[Candle]]:
-    # 1) если есть csv и файл существует → грузим csv
+    # STRICT: требуем CSV и успешную загрузку
+    if getattr(args, "strict", False):
+        if not args.csv:
+            raise ValueError("--strict requires --csv")
+        candles = load_csv_candles(args.csv, limit=int(args.limit or 0))
+        if not candles:
+            raise ValueError(f"CSV loaded but empty: {args.csv}")
+        return "csv", candles
+
+    # NON-STRICT: csv -> fallback -> synthetic
     if args.csv:
         try:
             candles = load_csv_candles(args.csv, limit=int(args.limit or 0))
             if candles:
                 return "csv", candles
+            else:
+                logger.warning("CSV loaded but empty (%s). Fallback to synthetic.", args.csv)
         except Exception as e:
             logger.warning("CSV load failed (%s). Fallback to synthetic.", e)
 
-    # 2) иначе synthetic
     candles = generate_synthetic_candles(
         n=int(args.n),
         start_price=float(args.start),
@@ -160,7 +170,11 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # logging
     p.add_argument("--log", type=str, default="WARNING", help="DEBUG|INFO|WARNING|ERROR")
-
+    p.add_argument(
+        "--strict",
+        action="store_true",
+        help="Disable fallbacks: require valid --csv, fail on any load error/empty data",
+    )
     args = p.parse_args(argv)
 
     level = getattr(logging, str(args.log).upper(), logging.WARNING)
@@ -201,10 +215,12 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         return 0
 
+    except ValueError as e:
+        logger.error("%s", e)
+        return 2
     except Exception as e:
         logger.exception("Backtest runner crashed unexpectedly: %s", e)
         return 2
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -1,4 +1,4 @@
-# finam_bot/core/risk_manager.py
+# /Users/alex/Finam/finam_bot/core/risk_manager.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -17,115 +17,83 @@ class TradePlan:
 
 class RiskManager:
     """
-    Универсальный RiskManager для бэктеста/лайва.
+    Risk manager with equity-based sizing.
 
-    Совместимость:
-    - __init__ принимает: capital=..., equity=..., start_equity=...
-    - хранит sl_atr_mult/tp_atr_mult (как ждёт backtest.run)
-    - calculate принимает direction/side/signal и equity/capital override
+    - risk_pct is applied to current equity (preferred) or capital as fallback.
+    - stop distance is ATR * sl_atr_mult with floor min_stop.
+    - take distance is ATR * tp_atr_mult.
     """
 
     def __init__(
         self,
-        equity: Optional[float] = None,
+        equity: float = 100_000.0,
         *,
-        capital: Optional[float] = None,
-        start_equity: Optional[float] = None,
-        risk_pct: float = 0.01,
+        capital: Optional[float] = None,   # compatibility alias
+        risk_pct: float = 0.01,            # 1% risk per trade by default
         sl_atr_mult: float = 1.0,
         tp_atr_mult: float = 1.0,
         min_stop: float = 0.01,
-        **_: Any,  # чтобы не падать от лишних kwargs в старом коде
     ):
-        base = (
-            capital
-            if capital is not None
-            else equity
-            if equity is not None
-            else start_equity
-            if start_equity is not None
-            else 100_000.0
-        )
+        # keep BOTH names for compatibility
+        self.equity = float(equity if capital is None else capital)
+        self.capital = float(self.equity)
 
-        self.equity = float(base)
-        self.capital = float(base)  # alias
         self.risk_pct = float(risk_pct)
-
-        # поля, которые ожидает runner/backtest
         self.sl_atr_mult = float(sl_atr_mult)
         self.tp_atr_mult = float(tp_atr_mult)
         self.min_stop = float(min_stop)
 
+    # ---- compatibility helper (used in tests / external code) ----
+    def position_size(self, stop_dist: float, *, equity: Optional[float] = None, capital: Optional[float] = None) -> float:
+        base = equity
+        if base is None:
+            base = capital
+        if base is None:
+            base = self.equity
+
+        stop = max(float(stop_dist), float(self.min_stop))
+        risk_amount = float(base) * float(self.risk_pct)
+
+        if stop <= 0 or risk_amount <= 0:
+            return 0.0
+        return risk_amount / stop
+
+    # ---- main API (engine uses it) ----
     def calculate(
         self,
         *,
-        direction: Optional[Direction | str] = None,
-        side: Optional[Direction | str] = None,
-        signal: Optional[Direction | str] = None,
         price: float,
         atr: float,
+        direction: Direction | str | None = None,
+        side: Direction | str | None = None,
+        signal: Direction | str | None = None,
         equity: Optional[float] = None,
         capital: Optional[float] = None,
         **_: Any,
     ) -> TradePlan:
-        """
-        Возвращает план сделки: qty, stop_loss, take_profit.
-
-        Приоритет выбора направления: direction > side > signal
-        Приоритет базы для sizing: equity override > capital override > self.equity
-        """
-
-        dir_raw = direction or side or signal or "LONG"
-        d = str(dir_raw).upper()
-        is_long = d in ("LONG", "BUY")
-
-        base_equity = (
-            float(equity) if equity is not None
-            else float(capital) if capital is not None
-            else float(self.equity)
-        )
-
-        atr_val = max(float(atr), 0.0)
-        stop_dist = max(self.min_stop, atr_val * self.sl_atr_mult)
-
-        # risk in money per trade
-        risk_money = max(0.0, base_equity * self.risk_pct)
-
-        qty = 0.0
-        if stop_dist > 0:
-            qty = risk_money / stop_dist
-
-        if is_long:
-            stop_loss = float(price) - stop_dist
-            take_profit = float(price) + max(self.min_stop, atr_val * self.tp_atr_mult)
+        # normalize direction
+        d = direction or side or signal or "LONG"
+        d = str(d).upper()
+        if d in ("BUY", "LONG"):
+            d = "LONG"
+        elif d in ("SELL", "SHORT"):
+            d = "SHORT"
         else:
-            stop_loss = float(price) + stop_dist
-            take_profit = float(price) - max(self.min_stop, atr_val * self.tp_atr_mult)
+            d = "LONG"
 
-        return TradePlan(qty=qty, stop_loss=stop_loss, take_profit=take_profit)
+        price = float(price)
+        atr = max(float(atr), 0.0)
 
+        stop_dist = max(atr * self.sl_atr_mult, self.min_stop)
+        take_dist = max(atr * self.tp_atr_mult, self.min_stop)
 
+        qty = self.position_size(stop_dist, equity=equity, capital=capital)
 
-    def position_size(
-        self,
-        stop_dist: float,
-        *,
-        equity: Optional[float] = None,
-        capital: Optional[float] = None,
-    ) -> float:
-        """
-        Backward-compatible helper used by tests.
-        qty = (risk_pct * equity) / stop_dist
-        """
-        base_equity = (
-            float(equity) if equity is not None
-            else float(capital) if capital is not None
-            else float(self.equity)
-        )
+        if d == "LONG":
+            stop_loss = price - stop_dist
+            take_profit = price + take_dist
+        else:
+            stop_loss = price + stop_dist
+            take_profit = price - take_dist
 
-        sd = float(stop_dist)
-        if sd <= 0:
-            return 0.0
-
-        risk_money = max(0.0, base_equity * float(self.risk_pct))
-        return risk_money / sd
+        return TradePlan(qty=float(qty), stop_loss=float(stop_loss), take_profit=float(take_profit))
