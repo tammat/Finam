@@ -118,3 +118,47 @@ def basic_trade_stats(pnls: Sequence[float]) -> Dict[str, float]:
         "profit_factor": float(pf),
         "expectancy": float(exp),
     }
+from typing import Sequence
+
+
+def compute_winrate(pnls: Sequence[float]) -> float:
+    """
+    Winrate по сделкам: wins / (wins + losses).
+    Нулевые PnL игнорируем.
+    Возвращает 0..1
+    """
+    wins = 0
+    losses = 0
+    for p in pnls or []:
+        p = float(p)
+        if p > 0:
+            wins += 1
+        elif p < 0:
+            losses += 1
+    total = wins + losses
+    return (wins / total) if total > 0 else 0.0
+
+
+def compute_profit_factor(pnls: Sequence[float]) -> float:
+    """
+    Profit Factor = sum(profits) / abs(sum(losses))
+    """
+    gross_profit = 0.0
+    gross_loss = 0.0
+    for p in pnls or []:
+        p = float(p)
+        if p > 0:
+            gross_profit += p
+        elif p < 0:
+            gross_loss += p  # отрицательное
+    if gross_loss == 0.0:
+        return float("inf") if gross_profit > 0 else 0.0
+    return gross_profit / abs(gross_loss)
+
+
+def compute_expectancy(pnls: Sequence[float]) -> float:
+    """
+    Expectancy = средний PnL на сделку (mean PnL).
+    """
+    pnls = [float(p) for p in (pnls or [])]
+    return (sum(pnls) / len(pnls)) if pnls else 0.0
