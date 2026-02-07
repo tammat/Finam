@@ -48,3 +48,26 @@ class Position:
         if self.is_long():
             return (price - self.entry_price) * self.qty
         return (self.entry_price - price) * self.qty
+
+
+from dataclasses import dataclass
+from typing import Optional, Literal
+
+AssetClass = Literal["equity", "future", "bond"]
+
+@dataclass
+class Instrument:
+    symbol: str
+    asset_class: AssetClass = "equity"
+
+    # bonds only
+    face_value: float = 1000.0          # номинал (обычно 1000)
+    price_is_percent: bool = False      # для облигаций True (цена в % от номинала)
+
+@dataclass
+class CashflowEvent:
+    ts: Optional[int]
+    symbol: str
+    kind: str              # "COUPON"
+    amount: float          # +cash
+    comment: str = ""

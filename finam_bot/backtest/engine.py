@@ -211,6 +211,7 @@ class BacktestEngine:
         self.equity_curve = [self.broker.equity]
         for i, c in enumerate(candles):
             # 1) исполняем отложенный вход по OPEN текущего бара
+            self.broker.last_price = c.close
             if self._pending is not None and self.broker.position is None:
                 p = self._pending
                 self.broker.open_position(

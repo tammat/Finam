@@ -1,5 +1,6 @@
 # finam_bot/backtest/run.py
 from __future__ import annotations
+from finam_bot.backtest.metrics import basic_trade_stats, compute_drawdown  # compute_drawdown можно и не использовать напрямую
 
 import argparse
 import csv
@@ -7,7 +8,7 @@ import logging
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Optional, Sequence, Tuple, List, Any
-
+from finam_bot.backtest.metrics import compute_summary
 from finam_bot.backtest.engine import BacktestEngine
 from finam_bot.backtest.models import Candle
 from finam_bot.backtest.synthetic import generate_synthetic_candles, generate_synthetic_orderflow
@@ -16,6 +17,22 @@ from finam_bot.strategies.order_flow_pullback import OrderFlowPullbackStrategy
 logger = logging.getLogger("backtest.run")
 
 
+# Exit codes (удобно для CI)
+EXIT_OK = 0
+EXIT_DATA_ERROR = 2
+EXIT_ENGINE_ERROR = 3
+EXIT_METRICS_ERROR = 4
+
+try:
+    from finam_bot.backtest.metrics import basic_trade_stats
+except Exception:
+    basic_trade_stats = None
+
+def _print_summary(broker, equity_curve=None):
+    if basic_trade_stats is None:
+        print(f"equity={broker.equity:.2f} cash={broker.cash:.2f} trades={len(getattr(broker, 'trades', []))}")
+        print("metrics: unavailable (basic_trade_stats import failed)")
+        return 0
 def _parse_float(x: Any, default: float = 0.0) -> float:
     try:
         return float(x)
@@ -64,6 +81,7 @@ def load_csv_candles(path: str, limit: int = 0) -> List[Candle]:
 def load_candles_auto(args) -> Tuple[str, List[Candle]]:
     # STRICT: требуем CSV и успешную загрузку
     if getattr(args, "strict", False):
+        logger.info("STRICT mode enabled")
         if not args.csv:
             raise ValueError("--strict requires --csv")
         candles = load_csv_candles(args.csv, limit=int(args.limit or 0))
@@ -77,8 +95,7 @@ def load_candles_auto(args) -> Tuple[str, List[Candle]]:
             candles = load_csv_candles(args.csv, limit=int(args.limit or 0))
             if candles:
                 return "csv", candles
-            else:
-                logger.warning("CSV loaded but empty (%s). Fallback to synthetic.", args.csv)
+            logger.warning("CSV loaded but empty (%s). Fallback to synthetic.", args.csv)
         except Exception as e:
             logger.warning("CSV load failed (%s). Fallback to synthetic.", e)
 
@@ -100,48 +117,110 @@ def _extract_pnls(trades: Sequence[Any]) -> List[float]:
             pnls.append(_parse_float(getattr(t, "pnl", 0.0)))
     return pnls
 
+def _print_summary(broker, equity_curve: Optional[Sequence[float]] = None) -> int:
+    """
+    Печатает статистику.
+    Возвращает:
+      0 — всё ок (даже если метрики недоступны, мы не падаем)
+      4 — метрики упали/недоступны (но вывод equity/trades всё равно печатаем)
+    """
+    trades = getattr(broker, "trades", []) or []
+    eq = float(getattr(broker, "equity", 0.0) or 0.0)
+    cash = float(getattr(broker, "cash", eq) or eq)
 
-def _print_summary(broker, equity_curve: Optional[Sequence[float]] = None) -> None:
-    print(
-        f"equity={broker.equity} cash={getattr(broker, 'cash', broker.equity)} trades={len(broker.trades)}"
-    )
+    # Базовый вывод — всегда
+    print(f"equity={eq:.2f} cash={cash:.2f} trades={len(trades)}")
 
-    # Метрики — безопасно, без падений
-    pnls = _extract_pnls(getattr(broker, "trades", []))
+    # Дефолтные ключи — чтобы никогда не падать по KeyError
+    s: dict[str, float] = {
+        "trades": float(len(trades)),
+        "wins": 0.0,
+        "losses": 0.0,
+        "winrate": 0.0,
+        "profit_factor": 0.0,
+        "expectancy": 0.0,
+        "total_pnl": 0.0,
+        "fees": 0.0,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "payoff": 0.0,
+        "max_drawdown_pct": 0.0,
+        "sharpe": 0.0,
+        "sortino": 0.0,
+        "max_win_streak": 0.0,
+        "max_loss_streak": 0.0,
+    }
 
-    # 1) trade stats
+    metrics_failed = False
+
+    # ---- trade stats ----
     try:
-        from finam_bot.backtest.metrics import basic_trade_stats  # ожидаем что есть
+        from dataclasses import asdict, is_dataclass
+        from finam_bot.backtest.metrics import basic_trade_stats
 
-        s = basic_trade_stats(pnls)
-        if is_dataclass(s):
-            s = asdict(s)
+        res = basic_trade_stats(trades, equity_curve=equity_curve)
 
-        wins = s.get("wins", 0)
-        losses = s.get("losses", 0)
-        winrate = s.get("winrate", 0.0)
-        pf = s.get("profit_factor", 0.0)
-        expectancy = s.get("expectancy", 0.0)
-        total = s.get("total_pnl", 0.0)
-        print(f"wins={wins} losses={losses} winrate={winrate*100:.2f}% profit_factor={pf:.2f}")
-        print(f"expectancy={expectancy:.4f} total_pnl={total:.2f}")
+        if is_dataclass(res):
+            res = asdict(res)
 
-    except Exception as e:
-        logger.debug("metrics.basic_trade_stats unavailable: %s", e)
+        if isinstance(res, dict):
+            for k, v in res.items():
+                try:
+                    s[k] = float(v)
+                except Exception:
+                    pass
+        else:
+            metrics_failed = True
+    except Exception:
+        metrics_failed = True
 
-    # 2) drawdown
+    # ---- equity stats: DD / Sharpe / Sortino ----
     try:
-        from finam_bot.backtest.metrics import compute_drawdown
-
         if equity_curve:
+            from finam_bot.backtest.metrics import compute_drawdown, compute_sharpe_sortino
+
             dd = compute_drawdown(list(equity_curve))
+            sr = compute_sharpe_sortino(list(equity_curve))
+
             if isinstance(dd, dict):
-                print(f"maxDD={dd.get('max_drawdown_pct', 0.0) * 100:.2f}%")
+                s["max_drawdown_pct"] = float(dd.get("max_drawdown_pct", 0.0) or 0.0)
             else:
-                # если вдруг вернули float
-                print(f"maxDD={float(dd) * 100:.2f}%")
-    except Exception as e:
-        logger.debug("metrics.compute_drawdown unavailable: %s", e)
+                s["max_drawdown_pct"] = float(dd or 0.0)
+
+            if isinstance(sr, dict):
+                s["sharpe"] = float(sr.get("sharpe", 0.0) or 0.0)
+                s["sortino"] = float(sr.get("sortino", 0.0) or 0.0)
+    except Exception:
+        metrics_failed = True
+
+    # ---- печать метрик (всё безопасно через get) ----
+    wins = int(s.get("wins", 0.0))
+    losses = int(s.get("losses", 0.0))
+    winrate = float(s.get("winrate", 0.0))
+    pf = float(s.get("profit_factor", 0.0))
+
+    expectancy = float(s.get("expectancy", 0.0))
+    total_pnl = float(s.get("total_pnl", 0.0))
+    fees = float(s.get("fees", 0.0))
+
+    avg_win = float(s.get("avg_win", 0.0))
+    avg_loss = float(s.get("avg_loss", 0.0))
+    payoff = float(s.get("payoff", 0.0))
+
+    max_dd_pct = float(s.get("max_drawdown_pct", 0.0))
+    sharpe = float(s.get("sharpe", 0.0))
+    sortino = float(s.get("sortino", 0.0))
+
+    max_win_streak = int(s.get("max_win_streak", 0.0))
+    max_loss_streak = int(s.get("max_loss_streak", 0.0))
+
+    print(f"wins={wins} losses={losses} winrate={winrate*100:.2f}% profit_factor={pf:.2f}")
+    print(f"expectancy={expectancy:.4f} total_pnl={total_pnl:.2f} fees={fees:.2f}")
+    print(f"avg_win={avg_win:.2f} avg_loss={avg_loss:.2f} payoff={payoff:.2f}")
+    print(f"maxDD={max_dd_pct*100:.2f}% sharpe={sharpe:.2f} sortino={sortino:.2f}")
+    print(f"streaks: win={max_win_streak} loss={max_loss_streak}")
+
+    return 4 if metrics_failed else 0
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -182,9 +261,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     logger.setLevel(level)
 
     try:
-        source, candles = load_candles_auto(args)
-        logger.warning("Loaded candles source=%s bars=%d", source, len(candles))
+        # ---- DATA LOAD ----
+        try:
+            source, candles = load_candles_auto(args)
+            logger.warning("Loaded candles source=%s bars=%d", source, len(candles))
+        except Exception as e:
+            logger.error("Data loading failed: %s", e)
+            return EXIT_DATA_ERROR
 
+        # ---- ENGINE ----
         strategy = OrderFlowPullbackStrategy(verbose=False)
 
         engine = BacktestEngine(
@@ -197,30 +282,37 @@ def main(argv: Optional[list[str]] = None) -> int:
             fill_policy=str(args.fill),
         )
 
+        # ---- ORDERFLOW ----
         of_list = None
         if args.with_orderflow:
-            of_list = generate_synthetic_orderflow(
-                n=len(candles),
-                seed=int(args.seed),
+            try:
+                of_list = generate_synthetic_orderflow(
+                    n=len(candles),
+                    seed=int(args.seed),
+                )
+            except Exception as e:
+                logger.error("Orderflow generation failed: %s", e)
+                return EXIT_ENGINE_ERROR
+
+        # ---- RUN BACKTEST ----
+        try:
+            broker = engine.run(
+                candles,
+                orderflow=of_list,
+                atr_floor=float(args.atr_floor),
             )
+        except Exception as e:
+            logger.error("Engine run failed: %s", e)
+            return EXIT_ENGINE_ERROR
 
-        broker = engine.run(
-            candles,
-            orderflow=of_list,
-            atr_floor=float(args.atr_floor),
-        )
-
+        # ---- SUMMARY ----
         eq_curve = getattr(engine, "equity_curve", None)
-        _print_summary(broker, eq_curve)
+        return _print_summary(broker, eq_curve)
 
-        return 0
-
-    except ValueError as e:
-        logger.error("%s", e)
-        return 2
     except Exception as e:
         logger.exception("Backtest runner crashed unexpectedly: %s", e)
-        return 2
+        return EXIT_ENGINE_ERROR
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
