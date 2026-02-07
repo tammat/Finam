@@ -32,8 +32,7 @@ class BrokerSim:
     - комиссия на вход и выход
     """
     def __init__(
-        self,
-        start_equity: float,
+        self,start_equity: float,
         commission: Optional[PercentCommission] = None,
         max_leverage: float = 1.0,
     ):
@@ -45,6 +44,7 @@ class BrokerSim:
         self.equity = float(start_equity)
         self.max_leverage = float(max_leverage)
         self.commission = commission or PercentCommission()
+        self.last_price: float | None = None
 
         self.position: Optional[Position] = None
         self.used_margin: float = 0.0
@@ -123,6 +123,12 @@ class BrokerSim:
 
         fee_entry = float(getattr(pos, "entry_fee", 0.0))
         total_fees = fee_entry + float(fee_exit)
+        pnl_gross = pos.unrealized_pnl(price)
+
+        fee_entry = float(getattr(pos, "entry_fee", 0.0))
+        total_fees = fee_entry + float(fee_exit)
+
+        pnl_net = pnl_gross - total_fees
 
         trade = Trade(
             symbol=pos.symbol,
@@ -139,3 +145,11 @@ class BrokerSim:
 
         self.trades.append(trade)
         return trade
+
+    def apply_cashflow(self, *, ts: int | None, symbol: str, amount: float, kind: str = "COUPON", comment: str = ""):
+        self.cash += amount
+        self.equity = self.cash + (
+            self.position.unrealized_pnl(self.last_price) if getattr(self, "position", None) and getattr(self,
+                                                                                                         "last_price",
+                                                                                                         None) else 0.0)
+        self.cashflows.append({"ts": ts, "symbol": symbol, "kind": kind, "amount": amount, "comment": comment})
