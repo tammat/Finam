@@ -187,7 +187,7 @@ def basic_trade_stats(
     Универсальная статистика:
     - можно передать список трейдов (с .pnl/.fees)
     - или список pnl (floats)
-    Возвращает dict с гарантированными ключами (под run.py).
+    Возвращает dict с гарантированными ключами (под cli.py).
     """
     # detect trades vs pnls
     pnls: List[float]
@@ -227,7 +227,7 @@ def basic_trade_stats(
     dd = compute_drawdown(equity_curve or [])
     sr = compute_sharpe_sortino(equity_curve or [])
 
-    # гарантируем все ключи для run.py
+    # гарантируем все ключи для cli.py
     return {
         "trades": float(n),
         "wins": float(wins),
@@ -252,7 +252,7 @@ def compute_summary(
     equity_curve: Optional[Sequence[float]] = None,
 ) -> Dict[str, float]:
     """
-    Алиас для совместимости с run.py и будущими версиями.
-    Всегда возвращает dict с ключами, которые ожидает run.py.
+    Алиас для совместимости с cli.py и будущими версиями.
+    Всегда возвращает dict с ключами, которые ожидает cli.py.
     """
     return basic_trade_stats(trades_or_pnls, equity_curve=equity_curve)
