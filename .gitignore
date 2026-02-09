@@ -29,4 +29,4 @@ proto_src/protoc-gen-openapiv2/
 # local
 .idea/
 finam_bot/data/
-trades.csv
+trades.csvgo-finam-grpc/
