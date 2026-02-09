@@ -1,0 +1,76 @@
+unset -f finam_status
+
+finam_status() {
+  local jwt="${JWT}"
+
+  # 1) если JWT нет — получаем из FINAM_TOKEN
+  if [[ -z "$jwt" ]]; then
+    if [[ -z "$FINAM_TOKEN" ]]; then
+      echo '{"ok":false,"stage":"env","error":"FINAM_TOKEN is empty"}'
+      return 1
+    fi
+
+    jwt="$(
+      curl -sS -X POST 'https://api.finam.ru/v1/sessions' \
+        -H 'Content-Type: application/json; charset=utf-8' \
+        -H 'Accept: application/json' \
+        -H 'User-Agent: finam-bot/0.1 (alex)' \
+        -d "{\"secret\":\"$FINAM_TOKEN\"}" \
+      | python - <<'PY'
+import sys, json
+try:
+  j=json.load(sys.stdin)
+  print(j.get("token",""))
+except Exception:
+  print("")
+PY
+    )"
+  fi
+
+  if [[ -z "$jwt" ]]; then
+    echo '{"ok":false,"stage":"env","error":"JWT is empty"}'
+    return 1
+  fi
+
+  # 2) проверяем JWT через sessions/details (БЕЗ слэша, БЕЗ -L)
+  local tmp_h tmp_b http ct head
+  tmp_h="$(mktemp)"; tmp_b="$(mktemp)"
+
+  http="$(
+    curl -sS 'https://api.finam.ru/v1/sessions/details' \
+      -H 'Accept: application/json' \
+      -H 'User-Agent: finam-bot/0.1 (alex)' \
+      -H "Authorization: Bearer $jwt" \
+      -D "$tmp_h" -o "$tmp_b" -w "%{http_code}"
+  )"
+
+  ct="$(awk -F': ' 'tolower($1)=="content-type"{print $2}' "$tmp_h" | tail -n 1 | tr -d '\r')"
+  head="$(head -c 200 "$tmp_b" | tr '\n' ' ' | tr -d '\r' | python - <<'PY'
+import sys, json
+s=sys.stdin.read()
+print(s)
+PY
+)"
+
+  python - <<PY
+import json,sys
+http=int("${http}" or 0)
+ct="${ct}"
+head="${head}"
+raw=open("${tmp_b}","rb").read()
+out={"ok":False,"http":http,"content_type":ct,"body_head":head}
+try:
+  j=json.loads(raw.decode("utf-8"))
+  slim={"ok":True}
+  if isinstance(j,dict):
+    for k in ("type","keyId","parent","created","renewExp","exp","scope","code","message"):
+      if k in j: slim[k]=j[k]
+  out=slim
+except Exception as e:
+  out["stage"]="parse"
+  out["error"]=str(e)
+print(json.dumps(out, ensure_ascii=False))
+PY
+
+  rm -f "$tmp_h" "$tmp_b"
+}

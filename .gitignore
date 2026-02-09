@@ -1,24 +1,19 @@
-# Python
+# python
 __pycache__/
 *.pyc
-*.pyo
 .venv/
 
-# Env
-.env
+# generated grpc/python
+finam_bot/gen/
+finam_bot/generated/
 
-# Logs
-*.log
-logs/
-
-# OS
+# local junk
 .DS_Store
-Thumbs.db
+0
 
-# IDE
-.vscode/
-.idea/
-trades.csv
-scripts/
-#data
-finam_bot/data/
+# secrets
+.env
+*.env
+**/env
+**/*token*
+**/*secret*
