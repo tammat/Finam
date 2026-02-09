@@ -17,3 +17,16 @@ finam_bot/generated/
 **/env
 **/*token*
 **/*secret*
+# generated
+finam_bot/gen/
+finam_bot/generated/
+
+# vendored deps / big stuff
+vendor/
+proto_src/google/
+proto_src/protoc-gen-openapiv2/
+
+# local
+.idea/
+finam_bot/data/
+trades.csv
