@@ -30,3 +30,5 @@ proto_src/protoc-gen-openapiv2/
 .idea/
 finam_bot/data/
 trades.csvgo-finam-grpc/
+go-finam-grpc/
+trades.csv
