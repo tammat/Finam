@@ -3,7 +3,8 @@ import json
 from datetime import datetime, timezone
 from finam_bot.finam_client import FinamClient
 from finam_bot.storage_sqlite import StorageSQLite
-
+import finam_bot.storage_sqlite
+print("STORAGE MODULE FILE:", finam_bot.storage_sqlite.__file__)
 
 def log(stage: str, **kwargs):
     payload = {"ok": True, "stage": stage}
@@ -86,9 +87,10 @@ def main():
         account_id=account_id,
         since=since_trades,
     )
-
-    storage.insert_trades(trades)
-
+    storage.insert_trades(trades, account_id)
+#    storage.insert_trades(trades)
+    cnt = storage.conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+    print("DB trades count AFTER INSERT:", cnt)
     log("trades", count=len(trades), since=since_trades_iso)
 
     # ---------------------------
