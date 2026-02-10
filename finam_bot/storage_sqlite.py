@@ -1,271 +1,180 @@
-# finam_bot/storage_sqlite.py
-from __future__ import annotations
-
-import hashlib
-import json
-import os
 import sqlite3
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import List, Any, Optional
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from google.protobuf.timestamp_pb2 import Timestamp
 
-try:
-    from google.protobuf.json_format import MessageToDict  # type: ignore
-except Exception:  # pragma: no cover
-    MessageToDict = None  # type: ignore
-
-
-DEFAULT_DB_PATH = "finam_bot/data/finam.sqlite3"
+DEFAULT_DB_PATH = Path("finam_bot/data/finam.db")
 
 
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _ensure_dir_for(path: str) -> None:
-    p = Path(path)
-    if p.parent:
-        p.parent.mkdir(parents=True, exist_ok=True)
-
-
-def _columns(con: sqlite3.Connection, table: str) -> list[str]:
-    cur = con.execute(f"PRAGMA table_info({table})")
-    return [row[1] for row in cur.fetchall()]  # row[1] = name
-
-
-def _table_exists(con: sqlite3.Connection, table: str) -> bool:
-    cur = con.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-        (table,),
-    )
-    return cur.fetchone() is not None
-
-
-def _pick_existing(cols: list[str], candidates: Tuple[str, ...]) -> Optional[str]:
-    s = set(cols)
-    for c in candidates:
-        if c in s:
-            return c
-    return None
-
-
-def _migrate_meta_to_v2(con: sqlite3.Connection) -> None:
-    """
-    Ensures meta table has columns: key, value, updated_at.
-    If old meta exists with different column names, migrate data.
-    """
-    if not _table_exists(con, "meta"):
-        con.execute(
-            """
-            CREATE TABLE IF NOT EXISTS meta (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
-        return
-
-    cols = _columns(con, "meta")
-    if "key" in cols and "value" in cols and "updated_at" in cols:
-        return
-
-    # try to infer old column names
-    key_col = _pick_existing(cols, ("key", "k", "name", "meta_key", "metaKey"))
-    val_col = _pick_existing(cols, ("value", "v", "val", "data", "meta_value", "metaValue"))
-    upd_col = _pick_existing(cols, ("updated_at", "updated", "updatedAt", "ts", "timestamp"))
-
-    # If we can't infer, do a "best effort": take first two text-ish columns
-    if key_col is None or val_col is None:
-        # fallback: use first two columns
-        if len(cols) >= 2:
-            key_col = key_col or cols[0]
-            val_col = val_col or cols[1]
-        else:
-            # broken table, recreate empty
-            con.execute("DROP TABLE IF EXISTS meta")
-            con.execute(
-                """
-                CREATE TABLE meta (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            return
-
-    # create new table
-    con.execute("DROP TABLE IF EXISTS meta_new")
-    con.execute(
-        """
-        CREATE TABLE meta_new (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-        """
-    )
-
-    now = _utc_now_iso()
-    if upd_col:
-        con.execute(
-            f"""
-            INSERT OR REPLACE INTO meta_new(key, value, updated_at)
-            SELECT CAST({key_col} AS TEXT),
-                   CAST({val_col} AS TEXT),
-                   COALESCE(CAST({upd_col} AS TEXT), ?)
-            FROM meta
-            """,
-            (now,),
-        )
-    else:
-        con.execute(
-            f"""
-            INSERT OR REPLACE INTO meta_new(key, value, updated_at)
-            SELECT CAST({key_col} AS TEXT),
-                   CAST({val_col} AS TEXT),
-                   ?
-            FROM meta
-            """,
-            (now,),
-        )
-
-    con.execute("DROP TABLE meta")
-    con.execute("ALTER TABLE meta_new RENAME TO meta")
-
-
-def _init_schema(con: sqlite3.Connection) -> None:
-    con.execute("PRAGMA journal_mode=WAL;")
-    con.execute("PRAGMA synchronous=NORMAL;")
-    con.execute("PRAGMA foreign_keys=ON;")
-
-    _migrate_meta_to_v2(con)
-
-    con.execute(
-        """
-        CREATE TABLE IF NOT EXISTS trades (
-            id TEXT PRIMARY KEY,
-            account_id TEXT,
-            ts TEXT,
-            raw_json TEXT NOT NULL
-        )
-        """
-    )
-    con.execute("CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(ts)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_trades_account_ts ON trades(account_id, ts)")
-
-    con.execute(
-        """
-        CREATE TABLE IF NOT EXISTS transactions (
-            id TEXT PRIMARY KEY,
-            account_id TEXT,
-            ts TEXT,
-            raw_json TEXT NOT NULL
-        )
-        """
-    )
-    con.execute("CREATE INDEX IF NOT EXISTS idx_transactions_ts ON transactions(ts)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_transactions_account_ts ON transactions(account_id, ts)")
-
-    con.commit()
-
-
-def connect(db_path: Optional[str] = None) -> sqlite3.Connection:
-    path = (db_path or os.getenv("FINAM_DB_PATH") or DEFAULT_DB_PATH).strip()
-    if not path:
-        path = DEFAULT_DB_PATH
-    _ensure_dir_for(path)
-    con = sqlite3.connect(path)
-    con.row_factory = sqlite3.Row
-    _init_schema(con)
-    return con
-
-
-def upsert_meta(con: sqlite3.Connection, key: str, value: str) -> None:
-    con.execute(
-        """
-        INSERT INTO meta(key, value, updated_at)
-        VALUES(?, ?, ?)
-        ON CONFLICT(key) DO UPDATE SET
-            value=excluded.value,
-            updated_at=excluded.updated_at
-        """,
-        (key, value, _utc_now_iso()),
-    )
-
-
-def _as_dict(obj: Any) -> Dict[str, Any]:
-    if MessageToDict is not None:
-        try:
-            return MessageToDict(obj, preserving_proto_field_name=True)  # type: ignore
-        except Exception:
-            pass
+def _get(obj: Any, name: str, default=None):
     if isinstance(obj, dict):
-        return obj
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+def _num(v, default=0.0):
+    """
+    Normalize numeric values:
+    int / float / str / Decimal -> float
+    None -> default (or None if default is None)
+    """
+    if v is None:
+        return None if default is None else float(default)
+    if isinstance(v, Decimal):
+        return float(v)
     try:
-        return dict(obj)  # type: ignore
+        return float(v)
     except Exception:
-        return {"repr": repr(obj)}
+        return None if default is None else float(default)
 
 
-def _json_dump(d: Dict[str, Any]) -> str:
-    return json.dumps(d, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+def _iso(ts) -> Optional[str]:
+    """
+    Normalize timestamp to ISO-8601 UTC string.
+    Supports:
+    - str (ISO)
+    - datetime
+    - protobuf Timestamp (seconds/nanos)
+    """
+    if ts is None:
+        return None
+
+    # already ISO string
+    if isinstance(ts, str):
+        return ts
+
+    # datetime
+    if isinstance(ts, datetime):
+        return ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    # protobuf Timestamp
+    if hasattr(ts, "seconds"):
+        dt = datetime.fromtimestamp(
+            ts.seconds + ts.nanos / 1_000_000_000,
+            tz=timezone.utc,
+        )
+        return dt.isoformat().replace("+00:00", "Z")
+
+    # fallback (should not happen anymore)
+    return str(ts)
 
 
-def _stable_id(raw_json: str) -> str:
-    return hashlib.sha256(raw_json.encode("utf-8")).hexdigest()[:32]
+class StorageSQLite:
+    def __init__(self, db_path: Path = DEFAULT_DB_PATH):
+        self.db_path = db_path
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(self.db_path)
+        self.conn.row_factory = sqlite3.Row
+        self.init_schema()
 
+    # ---------------------------
+    # schema
+    # ---------------------------
+    def init_schema(self):
+        self.conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS trades (
+                id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                ts TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                qty REAL NOT NULL,
+                price REAL NOT NULL,
+                commission REAL,
+                currency TEXT,
+                raw_json TEXT
+            );
 
-def _pick_first(d: Dict[str, Any], keys: Tuple[str, ...]) -> Optional[str]:
-    for k in keys:
-        v = d.get(k)
-        if v is None:
-            continue
-        if isinstance(v, (int, float)):
-            return str(v)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    return None
+            CREATE TABLE IF NOT EXISTS transactions (
+                id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                ts TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                amount REAL NOT NULL,
+                currency TEXT NOT NULL,
+                raw_json TEXT
+            );
 
+            CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(ts);
+            CREATE INDEX IF NOT EXISTS idx_trades_symbol_ts ON trades(symbol, ts);
+            CREATE INDEX IF NOT EXISTS idx_transactions_ts ON transactions(ts);
+            """
+        )
+        self.conn.commit()
 
-def insert_trade(con: sqlite3.Connection, trade: Any, account_id: Optional[str] = None) -> None:
-    d = _as_dict(trade)
-    raw = _json_dump(d)
-
-    tid = _pick_first(d, ("id", "trade_id", "tradeId", "order_id", "orderId")) or _stable_id(raw)
-    ts = _pick_first(d, ("ts", "time", "timestamp", "created_at", "createdAt", "date"))
-    acc = account_id or _pick_first(d, ("account_id", "accountId"))
-
-    con.execute(
+    # ---------------------------
+    # insert (DEDUP SAFE)
+    # ---------------------------
+    def insert_trades(self, trades: List[Any]):
+        sql = """
+        INSERT OR IGNORE INTO trades
+        (id, account_id, ts, symbol, side, qty, price, commission, currency, raw_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
-        INSERT INTO trades(id, account_id, ts, raw_json)
-        VALUES(?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-            account_id=COALESCE(excluded.account_id, trades.account_id),
-            ts=COALESCE(excluded.ts, trades.ts),
-            raw_json=excluded.raw_json
-        """,
-        (tid, acc, ts, raw),
-    )
+        rows = []
+        for t in trades:
+            rows.append(
+                (
+                    str(_get(t, "id")),
+                    str(_get(t, "account_id")),
+                    _iso(_get(t, "ts") or _get(t, "timestamp")),
+                    str(_get(t, "symbol")),
+                    str(_get(t, "side")),
+                    _num(_get(t, "qty") or _get(t, "size")),
+                    _num(_get(t, "price")),
+                    _num(_get(t, "commission"), None),
+                    _get(t, "currency"),
+                    str(_get(t, "raw_json") or ""),
+                )
+            )
+        self.conn.executemany(sql, rows)
+        self.conn.commit()
 
-
-def insert_tx(con: sqlite3.Connection, tx: Any, account_id: Optional[str] = None) -> None:
-    d = _as_dict(tx)
-    raw = _json_dump(d)
-
-    xid = _pick_first(d, ("id", "transaction_id", "transactionId", "tx_id", "txId")) or _stable_id(raw)
-    ts = _pick_first(d, ("ts", "time", "timestamp", "created_at", "createdAt", "date"))
-    acc = account_id or _pick_first(d, ("account_id", "accountId"))
-
-    con.execute(
+    def insert_transactions(self, transactions: List[Any]):
+        sql = """
+        INSERT OR IGNORE INTO transactions
+        (id, account_id, ts, kind, amount, currency, raw_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """
-        INSERT INTO transactions(id, account_id, ts, raw_json)
-        VALUES(?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-            account_id=COALESCE(excluded.account_id, transactions.account_id),
-            ts=COALESCE(excluded.ts, transactions.ts),
-            raw_json=excluded.raw_json
-        """,
-        (xid, acc, ts, raw),
-    )
+        rows = []
+        for t in transactions:
+            rows.append(
+                (
+                    str(_get(t, "id")),
+                    str(_get(t, "account_id")),
+                    _iso(_get(t, "ts") or _get(t, "timestamp")),
+                    str(_get(t, "kind")),
+                    _num(_get(t, "amount")),
+                    str(_get(t, "currency")),
+                    str(_get(t, "raw_json") or ""),
+                )
+            )
+        self.conn.executemany(sql, rows)
+        self.conn.commit()
+
+    # ---------------------------
+    # since helpers
+    # ---------------------------
+    def _get_max_ts(self, table: str, account_id: str) -> Optional[str]:
+        cur = self.conn.execute(
+            f"SELECT MAX(ts) AS max_ts FROM {table} WHERE account_id = ?",
+            (account_id,),
+        )
+        row = cur.fetchone()
+        return row["max_ts"] if row and row["max_ts"] else None
+
+    def get_since_trades(self, account_id: str, overlap_minutes: int = 10) -> str:
+        return self._calc_since(self._get_max_ts("trades", account_id), overlap_minutes)
+
+    def get_since_transactions(self, account_id: str, overlap_minutes: int = 10) -> str:
+        return self._calc_since(self._get_max_ts("transactions", account_id), overlap_minutes)
+
+    @staticmethod
+    def _calc_since(max_ts: Optional[str], overlap_minutes: int) -> str:
+        if not max_ts:
+            return "1970-01-01T00:00:00Z"
+        dt = datetime.fromisoformat(max_ts.replace("Z", "+00:00"))
+        dt -= timedelta(minutes=overlap_minutes)
+        return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
