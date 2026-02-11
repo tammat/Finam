@@ -36,3 +36,9 @@ trades.csv
 # secrets
 .env
 **/.env
+
+# grpc build deps
+finam-trade-api/
+googleapis/
+proto/
+protoc-gen-openapiv2/
