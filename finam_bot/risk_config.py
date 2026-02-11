@@ -35,3 +35,8 @@ class RiskConfigV22:
             "stocks": 50_000,
             "bonds": 20_000,
         }
+# базовый лимит риска на сделку (абсолют)
+MAX_RISK = 1000
+
+# алиас для QtyCalculator / run_signals
+MAX_RISK_PER_TRADE = MAX_RISK

@@ -43,3 +43,4 @@ python-telegram-bot==20.7
 grpcio>=1.60.0
 grpcio-tools>=1.60.0
 python-telegram-bot==20.7
+python-dotenv>=1.2.1

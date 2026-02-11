@@ -1,4 +1,8 @@
 from .calculator import QtyCalculator
-from .rules import QtyRules
+from .rules import QTY_RULES, QtyRule
 
-__all__ = ["QtyCalculator", "QtyRules"]
+__all__ = [
+    "QtyCalculator",
+    "QTY_RULES",
+    "QtyRule",
+]

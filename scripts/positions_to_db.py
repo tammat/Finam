@@ -1,113 +1,117 @@
+import sqlite3
 from collections import defaultdict
-from decimal import Decimal
-from finam_bot.storage_sqlite import StorageSQLite
-import finam_bot.storage_sqlite
-print("STORAGE MODULE FILE:", finam_bot.storage_sqlite.__file__)
+from pathlib import Path
 
-def calc_positions_fifo(trades):
-    positions = defaultdict(list)
-    realized = defaultdict(Decimal)
-
-    for t in trades:
-        symbol = t["symbol"]
-        side = t["side"]
-        qty = Decimal(str(t["qty"]))
-        price = Decimal(str(t["price"]))
-
-        direction = Decimal("1") if side in ("BUY", "SIDE_BUY") else Decimal("-1")
-        remaining = qty
-
-        while remaining > 0 and positions[symbol] and positions[symbol][0]["dir"] != direction:
-            lot = positions[symbol][0]
-            close_qty = min(remaining, lot["qty"])
-
-            realized[symbol] += close_qty * (price - lot["price"]) * lot["dir"]
-
-            lot["qty"] -= close_qty
-            remaining -= close_qty
-            if lot["qty"] == 0:
-                positions[symbol].pop(0)
-
-        if remaining > 0:
-            positions[symbol].append({"qty": remaining, "price": price, "dir": direction})
-
-    return positions, realized
+DB_PATH = Path("finam_bot/data/finam.db")
 
 
-def ensure_positions_table(storage: StorageSQLite):
-    storage.conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS positions (
-            instrument TEXT PRIMARY KEY,
-            qty REAL NOT NULL,
-            side TEXT NOT NULL,
-            avg_price REAL,
-            realized_pnl REAL NOT NULL,
-            updated_ts TEXT NOT NULL
-        );
-        """
-    )
-    storage.conn.commit()
+def asset_class_by_symbol(symbol: str) -> str:
+    """
+    Классификация инструмента.
+    Расширяется позже (Risk v2.3+).
+    """
+    s = symbol.upper()
 
+    if s.startswith(("NG", "BR", "CL")):
+        return "FUTURES"
 
-def upsert(storage: StorageSQLite, instrument, qty, side, avg_price, realized_pnl):
-    storage.conn.execute(
-        """
-        INSERT INTO positions (instrument, qty, side, avg_price, realized_pnl, updated_ts)
-        VALUES (?, ?, ?, ?, ?, datetime('now'))
-        ON CONFLICT(instrument) DO UPDATE SET
-            qty = excluded.qty,
-            side = excluded.side,
-            avg_price = excluded.avg_price,
-            realized_pnl = excluded.realized_pnl,
-            updated_ts = excluded.updated_ts
-        """,
-        (instrument, qty, side, avg_price, realized_pnl),
-    )
+    if s.endswith((".ME", ".RU")):
+        return "STOCKS"
+
+    return "UNKNOWN"
 
 
 def main():
+    if not DB_PATH.exists():
+        print("DB not found:", DB_PATH)
+        return
 
-    storage = StorageSQLite()
-    print("DB PATH:", storage.db_path)
-    ensure_positions_table(storage)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
 
-    trades = storage.conn.execute(
-        "SELECT * FROM trades ORDER BY ts, trade_id"
+    # --- читаем сделки ---
+    trades = conn.execute(
+        """
+        SELECT symbol, side, qty, price
+        FROM trades
+        ORDER BY ts
+        """
     ).fetchall()
 
-    print("trades read:", len(trades))
+    print(f"trades read: {len(trades)}")
+
     if not trades:
         print("No trades in DB")
         return
 
-    lots_by_symbol, realized = calc_positions_fifo(trades)
+    # --- агрегируем позиции ---
+    positions = defaultdict(lambda: {
+        "instrument": None,
+        "qty": 0.0,
+        "value": 0.0,   # qty * price
+    })
 
-    storage.conn.execute("DELETE FROM positions")
-    storage.conn.commit()
+    for t in trades:
+        instrument = t["symbol"]
+        side = t["side"]
+        qty = float(t["qty"])
+        price = float(t["price"])
 
-    symbols = set(lots_by_symbol.keys()) | set(realized.keys())
-    written = 0
+        p = positions[instrument]
+        p["instrument"] = instrument
 
-    for symbol in sorted(symbols):
-        lots = lots_by_symbol.get(symbol, [])
-        rpn = float(realized.get(symbol, Decimal("0")))
-
-        if not lots:
-            upsert(storage, symbol, 0.0, "FLAT", None, rpn)
-            written += 1
+        if side.upper() in ("BUY", "LONG"):
+            signed_qty = qty
+        elif side.upper() in ("SELL", "SHORT"):
+            signed_qty = -qty
+        else:
             continue
 
-        net_qty = sum(l["qty"] * l["dir"] for l in lots)
-        abs_qty = sum(l["qty"] for l in lots)
-        avg_price = (sum(l["qty"] * l["price"] for l in lots) / abs_qty) if abs_qty != 0 else None
+        p["qty"] += signed_qty
+        p["value"] += signed_qty * price
 
-        side = "LONG" if net_qty > 0 else "SHORT"
-        upsert(storage, symbol, float(abs(net_qty)), side, float(avg_price), rpn)
+    # --- очищаем positions ---
+    conn.execute("DELETE FROM positions")
+
+    written = 0
+
+    for p in positions.values():
+        qty = p["qty"]
+
+        if qty == 0:
+            continue
+
+        instrument = p["instrument"]
+        avg_price = abs(p["value"] / qty)
+        side = "LONG" if qty > 0 else "SHORT"
+        asset_class = asset_class_by_symbol(instrument)
+
+        conn.execute(
+            """
+            INSERT INTO positions (
+                instrument,
+                side,
+                asset_class,
+                qty,
+                avg_price
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                instrument,
+                side,
+                asset_class,
+                qty,
+                avg_price,
+            )
+        )
+
         written += 1
 
-    storage.conn.commit()
-    print("positions written:", written)
+    conn.commit()
+    conn.close()
+
+    print(f"positions written: {written}")
 
 
 if __name__ == "__main__":

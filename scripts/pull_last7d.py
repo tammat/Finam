@@ -5,7 +5,7 @@ from finam_bot.finam_client import FinamClient
 from finam_bot.storage_sqlite import StorageSQLite
 import finam_bot.storage_sqlite
 print("STORAGE MODULE FILE:", finam_bot.storage_sqlite.__file__)
-
+from finam_bot.env import load_env
 def log(stage: str, **kwargs):
     payload = {"ok": True, "stage": stage}
     payload.update(kwargs)
@@ -29,6 +29,7 @@ def main():
     # ---------------------------
     # config
     # ---------------------------
+    load_env()
     account_id = os.getenv("FINAM_ACCOUNT_ID")
     if not account_id:
         raise RuntimeError("FINAM_ACCOUNT_ID is not set")

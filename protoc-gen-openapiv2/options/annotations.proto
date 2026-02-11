@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package grpc.gateway.protoc_gen_openapiv2.options;
+
+import "google/protobuf/descriptor.proto";
+
+extend google.protobuf.FileOptions {
+  string openapiv2_swagger = 1042;
+}
+
+extend google.protobuf.MethodOptions {
+  string openapiv2_operation = 1043;
+}
