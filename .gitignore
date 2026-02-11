@@ -42,3 +42,7 @@ finam-trade-api/
 googleapis/
 proto/
 protoc-gen-openapiv2/
+.venv
+.grpc_tmp
+finam_bot/grpc_api
+.env
