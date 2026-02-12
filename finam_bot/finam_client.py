@@ -8,7 +8,6 @@ from typing import Any, Callable, Dict, List, Optional
 import time
 import grpc
 from dotenv import load_dotenv
-from finam_bot.clients.base import BaseClient
 from google.type import interval_pb2
 from google.protobuf.timestamp_pb2 import Timestamp
 from google.protobuf import timestamp_pb2
@@ -46,11 +45,15 @@ def _load_env_once() -> None:
 
 _load_env_once()
 
+
+
+
 # -------------------------------------------------
 # CLIENT
 # -------------------------------------------------
+from finam_bot.clients.base import BaseTradingClient
 
-class FinamClient(BaseClient):
+class FinamClient(BaseTradingClient):
     def __init__(self):
         self.execution_enabled = os.getenv("EXECUTION_ENABLED", "0") == "1"
         self.mode = os.getenv("MODE", "REAL").upper()
@@ -89,7 +92,9 @@ class FinamClient(BaseClient):
         print("JWT length:", len(self.jwt_token))
 
     # -------------------------------------------------
-
+    def get_portfolios(self):
+        raw = self.get_portfolios_raw()
+        return raw["portfolios"]
     def _exchange_token(self) -> str:
         """
         Обменивает API токен на session JWT через AuthService

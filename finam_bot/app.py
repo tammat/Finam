@@ -37,7 +37,8 @@ async def market_loop(engine: TradeEngine, grpc: FinamGrpcClient):
 async def main():
     print("🟢 START S7.C — STREAM → SNAPSHOT → ENGINE")
 
-    grpc = FinamGrpcClient()
+    from finam_bot.grpc.factory import create_client
+    grpc = create_client()
     engine = TradeEngine(
         symbol=config.SYMBOL,
         equity=config.START_EQUITY,
