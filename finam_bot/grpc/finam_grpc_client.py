@@ -170,3 +170,13 @@ class FinamGrpcClient:
         print("🧪 TEST cancel_order()")
         return {"order_id": order_id, "status": "CANCELLED"}
 
+    def health_check(self) -> bool:
+        """
+        Проверка доступности Finam API
+        """
+        try:
+            self.get_account()
+            return True
+        except Exception as e:
+            print("⚠ Health check failed:", e)
+            return False

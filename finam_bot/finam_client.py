@@ -1,9 +1,11 @@
 # finam_bot/finam_client.py
 
+import os
+os.environ["GRPC_DNS_RESOLVER"] = "native"
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
-
+import time
 import os
 import grpc
 from dotenv import load_dotenv
@@ -88,25 +90,46 @@ class FinamClient:
     # -------------------------------------------------
 
     def _exchange_token(self) -> str:
+        """
+        Обменивает API токен на session JWT через AuthService
+        С retry и backoff
+        """
+
+        max_attempts = 3
+        delay = 1.0
+
         req = auth_service_pb2.AuthRequest(secret=self.api_token)
-        resp = self._auth_stub.Auth(req)
-        return resp.token
 
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = self._auth_stub.Auth(req)
+                return resp.token
+
+            except grpc.RpcError as e:
+                print(f"Auth attempt {attempt} failed:", e)
+
+                if attempt == max_attempts:
+                    raise
+
+                time.sleep(delay)
+                delay *= 2  # экспоненциальный backoff
     # -------------------------------------------------
-
     def _rpc_call(self, fn, request):
-        try:
-            return fn(
-                request,
-                metadata=self.metadata,
-                timeout=5,  # защита от зависания
-            )
-        except grpc.RpcError as e:
-            print("⚠ gRPC error:", e.code(), e.details())
-            return None
-        except Exception as e:
-            print("⚠ Unexpected RPC error:", e)
-            return None
+        max_attempts = 3
+        delay = 0.5
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return fn(request, metadata=self.metadata)
+
+            except grpc.RpcError as e:
+                print(f"RPC attempt {attempt} failed:", e)
+
+                if attempt == max_attempts:
+                    raise
+
+                time.sleep(delay)
+                delay *= 2
 
     def get_account(self):
         req = accounts_service_pb2.GetAccountRequest(
@@ -114,6 +137,38 @@ class FinamClient:
         )
         return self._rpc_call(self.accounts.GetAccount, req)
 
+
+
+    def get_portfolios_raw(self):
+        account = self.get_account()
+
+        class _Portfolio:
+            def __init__(self, account_id, balance):
+                self.account_id = account_id
+                self.balance = balance
+
+        class _Response:
+            def __init__(self, portfolios):
+                self.portfolios = portfolios
+
+        balance = 0.0
+
+        if getattr(account, "portfolio_mc", None) and account.portfolio_mc.available_cash:
+            balance = float(account.portfolio_mc.available_cash.value)
+
+        elif getattr(account, "portfolio_forts", None) and account.portfolio_forts.available_cash:
+            balance = float(account.portfolio_forts.available_cash.value)
+
+        portfolio = _Portfolio(account.account_id, balance)
+
+        return _Response([portfolio])
+
+    def health_check(self) -> bool:
+        try:
+            self.get_account()
+            return True
+        except Exception:
+            return False
     # -------------------------------------------------
     # TRADES
     # -------------------------------------------------
