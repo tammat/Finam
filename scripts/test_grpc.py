@@ -1,8 +1,8 @@
-from finam_bot.grpc import FinamGrpcClient
 from finam_bot.services.market_data import MarketDataService
+from finam_bot.grpc.factory import create_client
 
 def main():
-    client = FinamGrpcClient()
+    client = create_client()
     service = MarketDataService(client)
 
     portfolios = service.get_portfolios()

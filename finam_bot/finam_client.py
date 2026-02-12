@@ -6,12 +6,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 import time
-import os
 import grpc
 from dotenv import load_dotenv
-
+from finam_bot.clients.base import BaseClient
 from google.type import interval_pb2
 from google.protobuf.timestamp_pb2 import Timestamp
+from google.protobuf import timestamp_pb2
 
 # --- gRPC stubs ---
 from finam_bot.grpc_api.grpc.tradeapi.v1.accounts import (
@@ -29,6 +29,9 @@ from finam_bot.grpc_api.grpc.tradeapi.v1.auth import (
     auth_service_pb2,
     auth_service_pb2_grpc,
 )
+from finam_bot.grpc_api.grpc.tradeapi.v1.orders import orders_service_pb2
+from finam_bot.grpc_api.grpc.tradeapi.v1 import side_pb2
+from google.type import decimal_pb2
 
 
 # -------------------------------------------------
@@ -43,15 +46,13 @@ def _load_env_once() -> None:
 
 _load_env_once()
 
-
 # -------------------------------------------------
 # CLIENT
 # -------------------------------------------------
 
-class FinamClient:
-
+class FinamClient(BaseClient):
     def __init__(self):
-
+        self.execution_enabled = os.getenv("EXECUTION_ENABLED", "0") == "1"
         self.mode = os.getenv("MODE", "REAL").upper()
         self.api_token = os.getenv("FINAM_TOKEN")
         self.account_id = os.getenv("FINAM_ACCOUNT_ID")
@@ -131,19 +132,28 @@ class FinamClient:
                 time.sleep(delay)
                 delay *= 2
 
+    # -----------------------------
+    # PUBLIC API
+    # -----------------------------
+
+    def get_trades(self, limit: int = 100, days: int = 7):
+        resp = self.get_trades_raw(limit=limit, days=days)
+        return self.normalize_trades(resp)
+    def get_transactions(self, days: int = 7, limit: int = 100):
+        resp = self.get_transactions_raw(days=days, limit=limit)
+        return self.normalize_transactions(resp)
+
     def get_account(self):
         req = accounts_service_pb2.GetAccountRequest(
             account_id=str(self.account_id)
         )
         return self._rpc_call(self.accounts.GetAccount, req)
 
-
-
     def get_portfolios_raw(self):
         account = self.get_account()
 
         class _Portfolio:
-            def __init__(self, account_id, balance):
+            def __init__(self, account_id: str, balance: float):
                 self.account_id = account_id
                 self.balance = balance
 
@@ -153,15 +163,13 @@ class FinamClient:
 
         balance = 0.0
 
-        if getattr(account, "portfolio_mc", None) and account.portfolio_mc.available_cash:
+        if getattr(account, "portfolio_mc", None) and getattr(account.portfolio_mc, "available_cash", None):
             balance = float(account.portfolio_mc.available_cash.value)
 
-        elif getattr(account, "portfolio_forts", None) and account.portfolio_forts.available_cash:
+        elif getattr(account, "portfolio_forts", None) and getattr(account.portfolio_forts, "available_cash", None):
             balance = float(account.portfolio_forts.available_cash.value)
 
-        portfolio = _Portfolio(account.account_id, balance)
-
-        return _Response([portfolio])
+        return _Response([_Portfolio(account.account_id, balance)])
 
     def health_check(self) -> bool:
         try:
@@ -172,21 +180,18 @@ class FinamClient:
     # -------------------------------------------------
     # TRADES
     # -------------------------------------------------
-
-    def get_trades(self, days: int = 7, limit: int = 100) -> List[Dict]:
+    def get_trades_raw(self, limit: int = 100, days: int = 7):
+        from finam_bot.grpc_api.grpc.tradeapi.v1.accounts import accounts_service_pb2
+        from google.type import interval_pb2
+        from google.protobuf import timestamp_pb2
+        from datetime import datetime, timedelta, timezone
 
         now = datetime.now(timezone.utc)
-        start = now - timedelta(days=days)
-
-        start_ts = Timestamp()
-        start_ts.FromDatetime(start)
-
-        end_ts = Timestamp()
-        end_ts.FromDatetime(now)
+        start = now - timedelta(days=int(days))
 
         interval = interval_pb2.Interval(
-            start_time=start_ts,
-            end_time=end_ts,
+            start_time=timestamp_pb2.Timestamp(seconds=int(start.timestamp())),
+            end_time=timestamp_pb2.Timestamp(seconds=int(now.timestamp())),
         )
 
         req = accounts_service_pb2.TradesRequest(
@@ -195,42 +200,22 @@ class FinamClient:
             interval=interval,
         )
 
-        resp = self._rpc_call(self.accounts.Trades, req)
-
-        out: List[Dict] = []
-
-        for t in resp.trades:
-            out.append({
-                "trade_id": t.trade_id,
-                "account_id": t.account_id,
-                "ts": t.timestamp.seconds if t.timestamp else None,
-                "symbol": t.symbol,
-                "side": t.side,
-                "qty": float(t.size.value) if t.size.value else None,
-                "price": float(t.price.value) if t.price.value else None,
-                "order_id": t.order_id,
-            })
-
-        return out
-
+        return self._rpc_call(self.accounts.Trades, req)
     # -------------------------------------------------
     # TRANSACTIONS
     # -------------------------------------------------
-
-    def get_transactions(self, days: int = 7, limit: int = 100) -> List[Dict]:
+    def get_transactions_raw(self, days: int = 7, limit: int = 100):
+        from finam_bot.grpc_api.grpc.tradeapi.v1.accounts import accounts_service_pb2
+        from google.type import interval_pb2
+        from google.protobuf import timestamp_pb2
+        from datetime import datetime, timedelta, timezone
 
         now = datetime.now(timezone.utc)
-        start = now - timedelta(days=days)
-
-        start_ts = Timestamp()
-        start_ts.FromDatetime(start)
-
-        end_ts = Timestamp()
-        end_ts.FromDatetime(now)
+        start = now - timedelta(days=int(days))
 
         interval = interval_pb2.Interval(
-            start_time=start_ts,
-            end_time=end_ts,
+            start_time=timestamp_pb2.Timestamp(seconds=int(start.timestamp())),
+            end_time=timestamp_pb2.Timestamp(seconds=int(now.timestamp())),
         )
 
         req = accounts_service_pb2.TransactionsRequest(
@@ -239,31 +224,76 @@ class FinamClient:
             interval=interval,
         )
 
-        resp = self._rpc_call(self.accounts.Transactions, req)
+        return self._rpc_call(self.accounts.Transactions, req)
 
-        out: List[Dict] = []
+    def normalize_transactions(self, resp):
+        out = []
+        def _money_to_float(m) -> float:
+            if m is None:
+                return 0.0
 
+            v = getattr(m, "value", None)
+            if v not in (None, ""):
+                return float(v)
+
+            units = getattr(m, "units", None)
+            nanos = getattr(m, "nanos", None)
+            if units is not None or nanos is not None:
+                u = int(units or 0)
+                n = int(nanos or 0)
+                return u + (n / 1_000_000_000)
+
+            return 0.0
+
+        def _money_currency(m) -> str:
+            if m is None:
+                return ""
+            return getattr(m, "currency_code", "") or ""
         for t in resp.transactions:
-
-            amount = 0.0
-            currency = None
-
-            if t.change:
-                currency = t.change.currency_code
-                amount = float(t.change.units) + float(t.change.nanos) / 1_000_000_000
+            change = getattr(t, "change", None)
 
             out.append({
                 "id": t.id,
                 "ts": t.timestamp.seconds if t.timestamp else None,
-                "symbol": t.symbol,
-                "category": t.transaction_category,
-                "amount": amount,
-                "currency": currency,
-                "description": t.transaction_name,
+                "symbol": "",
+                "category": t.category,
+                "amount": _money_to_float(change),
+                "currency": _money_currency(change),
+                "description": getattr(t, "transaction_name", "") or "",
             })
-
         return out
+    def _build_order(
+            self,
+            symbol: str,
+            side: str,
+            qty: float,
+            order_type,
+            price: float | None = None,
+    ):
+        from finam_bot.grpc_api.grpc.tradeapi.v1.orders import orders_service_pb2
+        from finam_bot.grpc_api.grpc.tradeapi.v1 import side_pb2
 
+        # если символ содержит @ — убираем суффикс
+        base_symbol = symbol.split("@")[0]
+
+        side_enum = (
+            side_pb2.SIDE_BUY
+            if side.upper() == "BUY"
+            else side_pb2.SIDE_SELL
+        )
+
+        order = orders_service_pb2.Order(
+            account_id=str(self.account_id),
+            symbol=base_symbol,
+            quantity=self._build_decimal(qty),
+            side=side_enum,
+            type=order_type,
+        )
+
+        if price is not None:
+            order.limit_price.CopyFrom(self._build_decimal(price))
+
+        return order
     # -------------------------------------------------
     # ORDERS
     # -------------------------------------------------
@@ -287,3 +317,122 @@ class FinamClient:
             order_id=str(order_id),
         )
         return self._rpc_call(self.orders.CancelOrder, req)
+
+    # -------------------------------------------------
+    # SYMBOL / MIC HELPERS
+    # -------------------------------------------------
+
+    def _parse_symbol(self, symbol: str) -> tuple[str, str]:
+        """
+        Принимает 'SBER@MISX'
+        Возвращает ('SBER', 'MISX')
+        """
+        if "@" not in symbol:
+            raise ValueError(
+                "Symbol must include MIC suffix, e.g. SBER@MISX or BRH6@RTSX"
+            )
+
+        base, mic = symbol.split("@", 1)
+
+        if not mic:
+            raise ValueError("MIC part is empty")
+
+        return base, mic
+
+    def _build_decimal(self, value: float):
+        from google.type import decimal_pb2
+        return decimal_pb2.Decimal(value=str(value))
+    # -------------------------------------------------
+    # ORDERS
+    # -------------------------------------------------
+
+    def place_market_order(self, symbol: str, side: str, qty: float, mic: str):
+        from finam_bot.grpc_api.grpc.tradeapi.v1.orders import orders_service_pb2
+        from finam_bot.grpc_api.grpc.tradeapi.v1 import side_pb2
+        from google.type import decimal_pb2
+
+        side_enum = side_pb2.SIDE_BUY if side.upper() == "BUY" else side_pb2.SIDE_SELL
+
+        order = orders_service_pb2.Order(
+            account_id=str(self.account_id),
+            symbol=str(symbol),
+            quantity=decimal_pb2.Decimal(value=str(qty)),
+            side=side_enum,
+            type=orders_service_pb2.ORDER_TYPE_MARKET,
+            mic=str(mic),
+        )
+
+        #return self._rpc_call(self.orders.PlaceOrder, order)
+        print(order)
+        return order
+    def place_limit_order(self, symbol: str, side: str, qty: float, price: float):
+        from finam_bot.grpc_api.grpc.tradeapi.v1.orders import orders_service_pb2
+        from finam_bot.grpc_api.grpc.tradeapi.v1 import side_pb2
+        from google.type import decimal_pb2
+
+        side_enum = (
+            side_pb2.SIDE_BUY
+            if side.upper() == "BUY"
+            else side_pb2.SIDE_SELL
+        )
+
+        order = orders_service_pb2.Order(
+            account_id=str(self.account_id),
+            symbol=str(symbol),
+            mic=str(mic),
+            quantity=decimal_pb2.Decimal(value=str(qty)),
+            side=side_enum,
+            type=orders_service_pb2.ORDER_TYPE_LIMIT,
+            limit_price=decimal_pb2.Decimal(value=str(price)),
+        )
+        print("ORDER BUILT:", order)
+        return order
+        #return self._rpc_call(self.orders.PlaceOrder, order)
+
+    def normalize_trades(self, resp):
+        def _money_to_float(m) -> float:
+            """
+            Поддержка разных вариантов представления суммы:
+            - Decimal(value="...")  -> m.value
+            - Money(units=..., nanos=...) -> units + nanos/1e9
+            """
+            if m is None:
+                return 0.0
+
+            # google.type.Decimal
+            v = getattr(m, "value", None)
+            if v not in (None, ""):
+                return float(v)
+
+            # protobuf money-like: units/nanos
+            units = getattr(m, "units", None)
+            nanos = getattr(m, "nanos", None)
+            if units is not None or nanos is not None:
+                u = int(units or 0)
+                n = int(nanos or 0)
+                return u + (n / 1_000_000_000)
+
+            return 0.0
+
+        def _money_currency(m) -> str:
+            if m is None:
+                return ""
+            return getattr(m, "currency_code", "") or ""
+        if not resp or not getattr(resp, "trades", None):
+            return []
+
+        result = []
+
+        for t in resp.trades:
+            result.append({
+                "trade_id": t.trade_id,
+                "account_id": t.account_id,
+                "ts": int(t.timestamp.seconds) if getattr(t, "timestamp", None) else None,
+                "symbol": t.symbol,
+                "side": t.side,
+                "qty": float(getattr(getattr(t, "size", None), "value", 0.0)) if getattr(t, "size", None) else 0.0,
+                "price": float(getattr(getattr(t, "price", None), "value", 0.0)) if getattr(t, "price", None) else 0.0,
+                "order_id": t.order_id,
+            })
+
+        return result
