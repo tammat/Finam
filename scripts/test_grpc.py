@@ -1,4 +1,4 @@
-from finam_bot.grpc.finam_grpc_client import FinamGrpcClient
+from finam_bot.grpc import FinamGrpcClient
 from finam_bot.services.market_data import MarketDataService
 
 def main():

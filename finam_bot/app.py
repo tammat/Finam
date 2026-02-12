@@ -3,7 +3,7 @@
 import asyncio
 
 from finam_bot import config
-from finam_bot.grpc.finam_grpc_client import FinamGrpcClient
+from finam_bot.grpc import FinamGrpcClient
 from finam_bot.core.trade_engine import TradeEngine
 from finam_bot.core.market_snapshot import MarketSnapshot
 from finam_bot.telegram.controller import TelegramController

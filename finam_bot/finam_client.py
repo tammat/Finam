@@ -94,12 +94,19 @@ class FinamClient:
 
     # -------------------------------------------------
 
-    def _rpc_call(self, fn: Callable, request: Any):
-        return fn(request, metadata=self.metadata)
-
-    # -------------------------------------------------
-    # ACCOUNT
-    # -------------------------------------------------
+    def _rpc_call(self, fn, request):
+        try:
+            return fn(
+                request,
+                metadata=self.metadata,
+                timeout=5,  # защита от зависания
+            )
+        except grpc.RpcError as e:
+            print("⚠ gRPC error:", e.code(), e.details())
+            return None
+        except Exception as e:
+            print("⚠ Unexpected RPC error:", e)
+            return None
 
     def get_account(self):
         req = accounts_service_pb2.GetAccountRequest(

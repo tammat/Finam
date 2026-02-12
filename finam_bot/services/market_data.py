@@ -1,6 +1,6 @@
 # finam_bot/services/market_data.py
 
-from finam_bot.grpc.finam_grpc_client import FinamGrpcClient
+from finam_bot.grpc import FinamGrpcClient
 from finam_bot.infra.grpc.adapters import (
     portfolios_to_dict,
     events_to_dict,
