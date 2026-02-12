@@ -28,6 +28,26 @@ class FinamGrpcClient:
         def __init__(self, portfolios):
             self.portfolios = portfolios
 
+    def get_portfolios(self):
+        """
+        Unified public API with REAL client.
+        Returns: list[dict] with keys: account_id, balance
+        """
+        raw = self.get_portfolios_raw()
+
+        # raw may be dict (new style)
+        if isinstance(raw, dict) and "portfolios" in raw:
+            return raw["portfolios"]
+
+        # raw may be legacy _PortfoliosResponse with .portfolios
+        if hasattr(raw, "portfolios"):
+            out = []
+            for p in raw.portfolios:
+                out.append({"account_id": getattr(p, "account_id", ""), "balance": float(getattr(p, "balance", 0.0))})
+            return out
+
+        # fallback
+        return []
     def get_portfolios_raw(self):
         print("🧪 TEST get_portfolios_raw()")
 
