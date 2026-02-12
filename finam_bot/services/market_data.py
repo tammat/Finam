@@ -1,21 +1,21 @@
 # finam_bot/services/market_data.py
 
 from finam_bot.grpc import FinamGrpcClient
-from finam_bot.infra.grpc.adapters import (
-    portfolios_to_dict,
-    events_to_dict,
-)
+
 
 
 class MarketDataService:
-
-    def __init__(self, grpc_client: FinamGrpcClient):
-        self.grpc = grpc_client
+    def __init__(self, client):
+        self.client = client
 
     def get_portfolios(self):
-        raw = self.grpc.get_portfolios_raw()
-        return portfolios_to_dict(raw)
+        return self.client.get_portfolios()
 
-    def get_events(self):
-        raw = self.grpc.get_events_raw()
-        return events_to_dict(raw)
+    def get_trades(self, limit=100):
+        return self.client.get_trades(limit=limit)
+
+    def get_transactions(self, days=7, limit=100):
+        return self.client.get_transactions(days=days, limit=limit)
+
+    def get_positions(self):
+        return self.client.get_positions()

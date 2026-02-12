@@ -1,14 +1,18 @@
 # finam_bot/grpc/factory.py
-
 import os
 
-MODE = os.getenv("MODE", "TEST").upper()
-
 def create_client():
-    if MODE == "REAL":
+    mode = os.getenv("MODE", "TEST").upper()
+    print("FACTORY MODE:", mode)
+
+    if mode == "REAL":
         from finam_bot.finam_client import FinamClient
         return FinamClient()
 
-    else:
-        from finam_bot.grpc.finam_grpc_client import FinamGrpcClient
-        return FinamGrpcClient()
+    from finam_bot.grpc.finam_grpc_client import FinamGrpcClient
+    return FinamGrpcClient()
+
+
+# если где-то уже используется make_client — оставь совместимость
+def make_client():
+    return create_client()

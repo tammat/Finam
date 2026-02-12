@@ -4,6 +4,7 @@ import os
 os.environ["GRPC_DNS_RESOLVER"] = "native"
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from finam_bot.clients import schema
 from typing import Any, Callable, Dict, List, Optional
 import time
 import grpc
@@ -94,7 +95,13 @@ class FinamClient(BaseTradingClient):
     # -------------------------------------------------
     def get_portfolios(self):
         raw = self.get_portfolios_raw()
-        return raw["portfolios"]
+        portfolios = raw["portfolios"]
+
+        for p in portfolios:
+            schema.validate_row(p, schema.PORTFOLIO_FIELDS, "PORTFOLIO")
+
+        return portfolios
+
     def _exchange_token(self) -> str:
         """
         Обменивает API токен на session JWT через AuthService
@@ -141,12 +148,23 @@ class FinamClient(BaseTradingClient):
     # PUBLIC API
     # -----------------------------
 
-    def get_trades(self, limit: int = 100, days: int = 7):
-        resp = self.get_trades_raw(limit=limit, days=days)
-        return self.normalize_trades(resp)
+    def get_trades(self, limit: int = 100):
+        resp = self.get_trades_raw(limit=limit)
+        trades = self.normalize_trades(resp)
+
+        for t in trades:
+            schema.validate_row(t, schema.TRADE_FIELDS, "TRADE")
+
+        return trades
+
     def get_transactions(self, days: int = 7, limit: int = 100):
         resp = self.get_transactions_raw(days=days, limit=limit)
-        return self.normalize_transactions(resp)
+        tx = self.normalize_transactions(resp)
+
+        for t in tx:
+            schema.validate_row(t, schema.TRANSACTION_FIELDS, "TRANSACTION")
+
+        return tx
 
     def get_account(self):
         req = accounts_service_pb2.GetAccountRequest(
@@ -157,25 +175,22 @@ class FinamClient(BaseTradingClient):
     def get_portfolios_raw(self):
         account = self.get_account()
 
-        class _Portfolio:
-            def __init__(self, account_id: str, balance: float):
-                self.account_id = account_id
-                self.balance = balance
-
-        class _Response:
-            def __init__(self, portfolios):
-                self.portfolios = portfolios
-
         balance = 0.0
 
-        if getattr(account, "portfolio_mc", None) and getattr(account.portfolio_mc, "available_cash", None):
+        if getattr(account, "portfolio_mc", None) and account.portfolio_mc.available_cash:
             balance = float(account.portfolio_mc.available_cash.value)
 
-        elif getattr(account, "portfolio_forts", None) and getattr(account.portfolio_forts, "available_cash", None):
+        elif getattr(account, "portfolio_forts", None) and account.portfolio_forts.available_cash:
             balance = float(account.portfolio_forts.available_cash.value)
 
-        return _Response([_Portfolio(account.account_id, balance)])
-
+        return {
+            "portfolios": [
+                {
+                    "account_id": account.account_id,
+                    "balance": balance,
+                }
+            ]
+        }
     def health_check(self) -> bool:
         try:
             self.get_account()
@@ -259,14 +274,14 @@ class FinamClient(BaseTradingClient):
 
             out.append({
                 "id": t.id,
-                "ts": t.timestamp.seconds if t.timestamp else None,
+                "ts": self._ts_to_iso(t.timestamp),
                 "symbol": "",
                 "category": t.category,
-                "amount": _money_to_float(change),
-                "currency": _money_currency(change),
+                "amount": _money_to_float(getattr(t, "change", None)),
+                "currency": _money_currency(getattr(t, "change", None)),
                 "description": getattr(t, "transaction_name", "") or "",
             })
-        return out
+            return out
     def _build_order(
             self,
             symbol: str,
@@ -429,15 +444,143 @@ class FinamClient(BaseTradingClient):
         result = []
 
         for t in resp.trades:
+            sym, mic = self._split_symbol(t.symbol)
+
             result.append({
                 "trade_id": t.trade_id,
                 "account_id": t.account_id,
-                "ts": int(t.timestamp.seconds) if getattr(t, "timestamp", None) else None,
-                "symbol": t.symbol,
-                "side": t.side,
-                "qty": float(getattr(getattr(t, "size", None), "value", 0.0)) if getattr(t, "size", None) else 0.0,
-                "price": float(getattr(getattr(t, "price", None), "value", 0.0)) if getattr(t, "price", None) else 0.0,
-                "order_id": t.order_id,
+                "ts": self._ts_to_iso(t.timestamp),
+                "symbol": sym,
+                "mic": mic,
+                "side": self._side_to_str(t.side),
+                "qty": self._decimal_to_float(getattr(t, "size", None)),
+                "price": self._decimal_to_float(getattr(t, "price", None)),                "order_id": t.order_id,
+            })
+        return result
+
+    from datetime import datetime, timezone
+
+    def _ts_to_iso(self, ts):
+        if not ts:
+            return None
+        return datetime.fromtimestamp(
+            ts.seconds + getattr(ts, "nanos", 0) / 1_000_000_000,
+            tz=timezone.utc
+        ).isoformat()
+
+    def _side_to_str(self, side):
+        # REAL: enum Side (обычно 1/2), TEST может отдавать строки
+        if side in (1, "SIDE_BUY", "BUY"):
+            return "BUY"
+        if side in (2, "SIDE_SELL", "SELL"):
+            return "SELL"
+        return ""
+
+    def _split_symbol(self, symbol: str):
+        if not symbol:
+            return "", ""
+        if "@" in symbol:
+            s, mic = symbol.split("@", 1)
+            return s, mic
+        return symbol, ""
+
+    def _decimal_to_float(self, d):
+        if d is None:
+            return 0.0
+
+        v = getattr(d, "value", None)
+        if v not in (None, ""):
+            return float(v)
+
+        units = getattr(d, "units", None)
+        nanos = getattr(d, "nanos", None)
+
+        if units is not None or nanos is not None:
+            u = int(units or 0)
+            n = int(nanos or 0)
+            return u + (n / 1_000_000_000)
+
+        return 0.0
+
+    def get_positions(self):
+        account = self.get_account()
+
+        positions = []
+
+        for p in getattr(account, "positions", []):
+            raw_symbol = p.symbol or ""
+
+            # Разделяем symbol и mic
+            if "@" in raw_symbol:
+                symbol, mic = raw_symbol.split("@", 1)
+            else:
+                symbol, mic = raw_symbol, ""
+
+            qty = float(getattr(getattr(p, "quantity", None), "value", 0.0))
+            avg_price = float(getattr(getattr(p, "average_price", None), "value", 0.0))
+            current_price = float(getattr(getattr(p, "current_price", None), "value", 0.0))
+
+            # PnL по позиции (если есть)
+            unrealized = float(
+                getattr(getattr(p, "unrealized_profit", None), "value", 0.0)
+            )
+
+            # если API не отдаёт unrealized по позиции — считаем вручную
+            if unrealized == 0.0 and qty and current_price and avg_price:
+                unrealized = (current_price - avg_price) * qty
+
+            positions.append({
+                "account_id": account.account_id,
+                "symbol": symbol,
+                "mic": mic,
+                "qty": qty,
+                "avg_price": avg_price,
+                "current_price": current_price,
+                "unrealized_pnl": unrealized,
             })
 
-        return result
+        return positions
+
+    def get_positions(self):
+        """
+        Нормализованные позиции под schema.POSITION_FIELDS:
+        account_id, symbol, mic, qty, avg_price, current_price, unrealized_pnl
+        """
+        account = self.get_account()
+
+        positions = getattr(account, "positions", None) or []
+        out = []
+
+        for p in positions:
+            sym_raw = getattr(p, "symbol", "") or ""
+            symbol, mic = self._split_symbol_mic(sym_raw)
+
+            qty = float(getattr(getattr(p, "quantity", None), "value", 0.0) or 0.0)
+            avg_price = float(getattr(getattr(p, "average_price", None), "value", 0.0) or 0.0)
+
+            # current_price в аккаунте обычно не приходит; берём last/close из marketdata при необходимости
+            # Пока безопасно: 0.0
+            current_price = float(getattr(getattr(p, "current_price", None), "value", 0.0) or 0.0)
+
+            # unrealized_pnl в аккаунте может быть только агрегатным; на позицию часто нет
+            unrealized_pnl = float(getattr(getattr(p, "unrealized_profit", None), "value", 0.0) or 0.0)
+
+            out.append({
+                "account_id": getattr(account, "account_id", ""),
+                "symbol": symbol,
+                "mic": mic,
+                "qty": qty,
+                "avg_price": avg_price,
+                "current_price": current_price,
+                "unrealized_pnl": unrealized_pnl,
+            })
+
+        return out
+
+    def _split_symbol_mic(self, s: str):
+        if not s:
+            return "", ""
+        if "@" in s:
+            a, b = s.split("@", 1)
+            return a, b
+        return s, ""
